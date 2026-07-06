@@ -1,0 +1,32 @@
+{
+    "name": "prettier-mojolicious-html-template",
+    "description": "Prettier Mojolicious template file plugin.",
+    "author": "Glenn Rice <drgrice1@missouriwestern.edu>",
+    "license": "LGPL-3.0-or-later",
+    "version": "0.0.1",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "watch": "tsc -w",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "lint": "eslint . --fix",
+        "lint:check": "eslint ."
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "@stylistic/eslint-plugin": "^5.10.0",
+        "@types/node": "^26.1.0",
+        "eslint": "^10.6.0",
+        "eslint-config-prettier": "^10.1.8",
+        "globals": "^17.7.0",
+        "prettier": "^3.9.4",
+        "typescript": "^6.0.3",
+        "typescript-eslint": "^8.62.1"
+    },
+    "peerDependencies": {
+        "prettier": "^3.9.4"
+    }
+}
