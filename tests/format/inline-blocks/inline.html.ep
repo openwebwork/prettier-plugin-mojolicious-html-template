@@ -1,0 +1,6 @@
+<div class="greeting">
+    <p>Hello, <%= $name %>!</p>
+    <p><%== $rawHtml %></p>
+    <% my $count = scalar(@items); %>
+    <p>You have <%= $count %> items.</p>
+</div>

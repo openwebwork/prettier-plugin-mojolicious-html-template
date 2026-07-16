@@ -1,0 +1,17 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`control.html.ep (mojolicious-html-template) 1`] = `
+"
+% my @items = (1, 2, 3);
+<ul>
+  % for my $item (@items) {
+  <li><%= $item %></li>
+  % }
+</ul>
+% if (1) {
+<p>Shown</p>
+% } else {
+<p>Hidden</p>
+% }
+"
+`;

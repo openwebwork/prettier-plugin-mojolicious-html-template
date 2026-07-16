@@ -14,7 +14,7 @@ export default [
         languageOptions: {
             globals: { ...globals.node, ...globals.browser },
             parserOptions: {
-                projectService: true,
+                project: ['./tsconfig.json', './tsconfig.test.json'],
                 tsconfigRootDir: import.meta.dirname
             }
         }

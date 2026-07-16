@@ -1,0 +1,11 @@
+% my @items = (1, 2, 3);
+<ul>
+% for my $item (@items) {
+    <li><%= $item %></li>
+% }
+</ul>
+% if (1) {
+    <p>Shown</p>
+% } else {
+    <p>Hidden</p>
+% }

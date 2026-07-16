@@ -13,7 +13,10 @@
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "lint": "eslint . --fix",
-        "lint:check": "eslint ."
+        "lint:check": "eslint .",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:update": "vitest run --update"
     },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
@@ -24,7 +27,8 @@
         "globals": "^17.7.0",
         "prettier": "^3.9.4",
         "typescript": "^6.0.3",
-        "typescript-eslint": "^8.62.1"
+        "typescript-eslint": "^8.62.1",
+        "vitest": "^4.1.10"
     },
     "peerDependencies": {
         "prettier": "^3.9.4"
