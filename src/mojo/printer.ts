@@ -516,13 +516,37 @@ const stripWrappersAndSubstitute = async (
             // earlier than strictly necessary once `suffix` is also subtracted, which is a far smaller
             // problem than the line quietly exceeding `printWidth` (found against two real templates).
             const delimiterOverhead = prefix.length + 1 + (suffix ? suffix.length + 1 : 0);
-            const perltidyLines = await runPerltidy(body, {
+            // A `<%= %>`/`%=` body is a bare expression with no trailing `;` (that's the Mojolicious
+            // convention - Mojo::Template evaluates it and uses the value), but `perltidy` treats "the
+            // final statement in a block, with no `;`" differently from an ordinary one for some
+            // formatting decisions - notably, it stops vertically aligning a chain of `?:`/`=>` operators
+            // (verified directly against `perltidy`: identical content produces misaligned ternary
+            // operators without a trailing `;`, correctly aligned with one). Since a non-`=` `<% %>`/`%`
+            // tag's body genuinely can be a real statement that already ends in `;`, only append one when
+            // it's actually missing, and strip it back off the reconstructed result's last line
+            // afterward - verified the `;` always stays glued to the last real token even when `perltidy`
+            // wraps the result across multiple lines, so a plain trailing-`;` strip on the last line is
+            // safe regardless of how many lines come back.
+            const hadTrailingSemicolon = body.trimEnd().endsWith(';');
+            const perltidyInput = hadTrailingSemicolon ? body : `${body};`;
+            // The synthetic `;` itself is one more character counting against perltidy's width budget
+            // that won't be there in the final output (it gets stripped below) - without compensating
+            // for it, a marker sitting exactly at the width boundary would wrap one column earlier than
+            // it should (found immediately after adding the `;` trick above: a real marker's body was
+            // exactly at its computed budget without the `;`, and the added character alone was enough
+            // to push perltidy into wrapping it instead of keeping it on one line).
+            const semicolonCompensation = hadTrailingSemicolon ? 0 : 1;
+            const perltidyLines = await runPerltidy(perltidyInput, {
                 configPath: perltidyContext.perltidyrcPath,
                 depth,
                 useTabs: perltidyContext.useTabs,
                 tabWidth: perltidyContext.tabWidth,
-                printWidth: Math.max(1, perltidyContext.printWidth - delimiterOverhead)
+                printWidth: Math.max(1, perltidyContext.printWidth - delimiterOverhead + semicolonCompensation)
             });
+            if (perltidyLines && !hadTrailingSemicolon) {
+                const lastIndex = perltidyLines.length - 1;
+                perltidyLines[lastIndex] = perltidyLines[lastIndex].replace(/;\s*$/, '');
+            }
             // A percent-line (`%=`/`%==`) marker can never safely become multi-line - Mojo::Template
             // only treats a line as Perl if it starts with `%`, so a continuation line without one
             // would be parsed as literal HTML output - so that combination is treated the same as a

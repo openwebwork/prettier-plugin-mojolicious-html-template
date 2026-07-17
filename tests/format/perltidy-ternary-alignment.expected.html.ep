@@ -1,0 +1,5 @@
+<%= include 'ContentGenerator/Base/problem_warning_and_debug_output',
+	warnings         => $c->{pg}{warnings},
+	warning_messages => ref $c->{pg}{warning_messages} eq 'ARRAY' ? $c->{pg}{warning_messages} : [],
+	debug_messages   => ref $c->{pg}{debug_messages} eq 'ARRAY'   ? $c->{pg}{debug_messages}   : []
+=%>
