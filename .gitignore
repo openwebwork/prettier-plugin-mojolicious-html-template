@@ -1,5 +1,6 @@
 dist
 node_modules
 .vim
+CLAUDE.local.md
 src/mojo/mojo.grammar.js
 src/mojo/mojo.grammar.terms.js
