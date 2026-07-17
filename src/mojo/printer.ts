@@ -106,6 +106,49 @@ const isBarePercentLine = (node: MojoNode): boolean =>
 // what leaving it to the ordinary `registerMarker` passthrough path already does.
 const isBlankPercentLine = (node: MojoNode): boolean => node.type === 'PlainMarker' && node.text.trim() === '%';
 
+// Collapses a run of 2+ consecutive `isBlankPercentLine` siblings (interspersed only by whitespace
+// `Text`) down to just the first one, matching how prettier collapses multiple blank lines elsewhere
+// and how `perltidy`'s own `-mbl` does for ordinary Perl. This can't be left to the perltidy/region path
+// alone (`flattenNode`'s blank-line contribution, collapsed by `perltidy`'s own blank-line settings when
+// a run happens to land *inside* an eligible region) because a run of blank lines is just as often *not*
+// part of any region at all - e.g. sitting right before a `Block` that's ineligible only because its
+// content happens to include a tag-form marker - in which case each blank line renders independently via
+// the ordinary per-node passthrough path, with nothing to deduplicate them against each other. Applied
+// once, up front, in `visitSequence`, before any region-scanning or per-node handling happens, so both
+// paths just see an already-collapsed node list and need no awareness of this at all.
+const collapseBlankPercentRuns = (nodes: MojoNode[]): MojoNode[] => {
+    const result: MojoNode[] = [];
+    let i = 0;
+    while (i < nodes.length) {
+        const node = nodes[i];
+        if (!isBlankPercentLine(node)) {
+            result.push(node);
+            i++;
+            continue;
+        }
+        result.push(node);
+        let j = i + 1;
+        // Keep scanning past further blank lines (dropping them) and the whitespace connecting them,
+        // but remember the most recent connector seen so there's still a valid separator between the
+        // surviving line and whatever comes next once the run ends.
+        let trailingConnector: MojoNode | undefined;
+        while (j < nodes.length) {
+            const next = nodes[j];
+            if (next.type === 'Text' && next.text.trim() === '') {
+                trailingConnector = next;
+                j++;
+            } else if (isBlankPercentLine(next)) {
+                j++;
+            } else {
+                break;
+            }
+        }
+        if (trailingConnector) result.push(trailingConnector);
+        i = j;
+    }
+    return result;
+};
+
 // True if `node` is a `Block` whose entire content - recursively - is nothing but bare `%` lines and
 // whitespace: every structural marker (Open/Mid/Close) is itself a bare `%` line (not tag-form), every
 // `PlainMarker` child is a bare `%` line, every `Text` child is whitespace-only, and every nested
@@ -254,7 +297,8 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // a run as ordinary reflowable prose and collapses every line onto one, so an empty wrapper is
     // spliced in to anchor the boundary - it's dropped again during substitution, contributing nothing
     // to the final output but forcing HTML to preserve the surrounding line breaks.
-    const visitSequence = (nodes: MojoNode[]) => {
+    const visitSequence = (rawNodes: MojoNode[]) => {
+        const nodes = collapseBlankPercentRuns(rawNodes);
         let i = 0;
         while (i < nodes.length) {
             // A region is only ever started at a real anchor (`isEligibleRegionMember`) - never at a
