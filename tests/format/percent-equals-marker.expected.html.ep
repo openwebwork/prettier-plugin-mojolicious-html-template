@@ -1,0 +1,7 @@
+<ul>
+    % for my $item (@items) {
+        <li>
+            %= $item * 2
+        </li>
+    % }
+</ul>

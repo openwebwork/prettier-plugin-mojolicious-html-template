@@ -1,0 +1,10 @@
+<div class="container">
+    <%= tag 'div',
+        id    => 'foo',
+        class => 'bar',
+        data  => {
+            x => 1,
+            y => 2,
+        }
+    =%>
+</div>

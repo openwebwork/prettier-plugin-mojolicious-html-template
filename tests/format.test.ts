@@ -6,8 +6,8 @@ import { test, expect } from 'vitest';
 import plugin from '../src/index.js';
 
 // Every fixture lives directly in tests/format/ as `<name>.html.ep`, matched by basename to two
-// optional companions: `<name>.expected.html.ep` (the exact output it must format to - if absent,
-// the fixture is snapshot-tested instead) and `<name>.options.json` (prettier option overrides, for
+// optional companions: `<basename>.expected.html.ep` (the exact output it must format to - if absent,
+// the fixture is snapshot-tested instead) and `<basename>.options.json` (prettier option overrides, for
 // the rare fixture that only makes sense at non-default settings, e.g. a wider printWidth).
 const FORMAT_DIR = path.join(import.meta.dirname, 'format');
 

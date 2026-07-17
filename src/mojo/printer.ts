@@ -1,5 +1,7 @@
+import { dirname } from 'node:path';
 import { doc, type AstPath, type Doc, type Options } from 'prettier';
 import type { MojoNode } from './ast.js';
+import { findPerltidyrc, runPerltidy } from './perltidy.js';
 
 const isStructuralMarker = (type: string): boolean =>
     type === 'OpenMarker' || type === 'MidMarker' || type === 'CloseMarker';
@@ -53,9 +55,38 @@ const MARKER_WRAPPER_OPEN_TAG = '<ol data-mojo-marker>';
 const CONTENT_INNER_OPEN_TAG = '<address data-mojo-inner>';
 const CONTENT_INNER_CLOSE_TAG = '</address>';
 
+// An own-line marker that's syntactically complete in isolation - tag-form (`<% %>`/`<%= %>`/
+// `<%== %>`, always terminated by an explicit `%>`/`=%>`) or `%=`/`%==` percent-lines (always
+// terminated by end-of-line, since Mojo::Template has no way to continue an "auto-output"
+// percent-line onto a next line) - gets `reformat` populated so `stripWrappersAndSubstitute` knows to
+// run it through `perltidy`. Bare `%` lines and structural markers are excluded: a bare `%` line can
+// legitimately be one piece of a Perl statement that continues across several consecutive `%`-lines
+// (`% my $var` / `% = 'value';`), and structural markers are fragments of a larger `{`/`}`/`begin`/
+// `end` chain - neither is safe to reformat as an isolated, one-node unit the way this pass does.
+interface MarkerInfo {
+    text: string;
+    reformat?: { prefix: string; body: string; suffix: string };
+}
+
+// Splits a reformat-eligible own-line `PlainMarker`'s raw text into its delimiter and body, or
+// returns `undefined` for a shape this phase doesn't handle (a bare `%` line, or anything malformed).
+const splitMarkerDelimiters = (text: string): { prefix: string; body: string; suffix: string } | undefined => {
+    if (text.startsWith('<%')) {
+        const prefix = text.startsWith('<%==') ? '<%==' : text.startsWith('<%=') ? '<%=' : '<%';
+        const rest = text.slice(prefix.length);
+        const suffix = rest.endsWith('=%>') ? '=%>' : rest.endsWith('%>') ? '%>' : undefined;
+        return suffix ? { prefix, body: rest.slice(0, rest.length - suffix.length).trim(), suffix } : undefined;
+    }
+    if (text.startsWith('%=')) {
+        const prefix = text.startsWith('%==') ? '%==' : '%=';
+        return { prefix, body: text.slice(prefix.length).trim(), suffix: '' };
+    }
+    return undefined;
+};
+
 interface Skeleton {
     skeleton: string;
-    markerTexts: string[];
+    markers: MarkerInfo[];
 }
 
 // Builds a plain-HTML "skeleton" string standing in for the whole template: every Mojo marker
@@ -68,7 +99,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // The full original source text (the Program node's own slice is the whole file), used to check
     // whether a marker sits alone on its own source line - see `isOwnLine` below.
     const source = programNode.text;
-    const markerTexts: string[] = [];
+    const markers: MarkerInfo[] = [];
     let skeleton = '';
     let counter = 0;
 
@@ -85,7 +116,9 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
 
     const registerMarker = (node: MojoNode) => {
         const id = counter++;
-        markerTexts[id] = node.text;
+        const ownLine = isOwnLine(node);
+        const reformat = node.type === 'PlainMarker' && ownLine ? splitMarkerDelimiters(node.text) : undefined;
+        markers[id] = { text: node.text, reformat };
         // Pad the placeholder out to (roughly) the real marker text's length so prettier's HTML
         // printer makes the same line-wrap/fits decisions it would make with the real text - not
         // "this short token obviously fits on one line", which was silently collapsing e.g.
@@ -110,7 +143,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // Structural markers (Open/Mid/Close) don't need this: their own-line separation from sibling
         // content is already handled by the empty-wrapper-separator logic in `visitSequence` below.
         skeleton +=
-            node.type === 'PlainMarker' && isOwnLine(node)
+            node.type === 'PlainMarker' && ownLine
                 ? `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`
                 : placeholder;
     };
@@ -166,7 +199,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
 
     visitSequence(programNode.children);
 
-    return { skeleton, markerTexts };
+    return { skeleton, markers };
 };
 
 const MARKER_RE = new RegExp(`${MARKER_OPEN}(\\d+)${MARKER_PAD}*${MARKER_CLOSE}`, 'g');
@@ -177,8 +210,15 @@ const MARKER_RE = new RegExp(`${MARKER_OPEN}(\\d+)${MARKER_PAD}*${MARKER_CLOSE}`
 // indentation the user themselves already gave their own multi-line Perl expression rather than
 // flattening it to a uniform re-indent - this project doesn't understand Perl syntax well enough to
 // re-derive that indentation correctly itself (that's the eventual job of a real `perltidy` pass).
-const substituteMarkers = (line: string, markerTexts: string[]): string =>
-    line.replace(MARKER_RE, (_, id: string) => markerTexts[Number(id)]);
+const substituteMarkers = (line: string, markers: MarkerInfo[]): string =>
+    line.replace(MARKER_RE, (_, id: string) => markers[Number(id)].text);
+
+// Matches a line whose content (already stripped of wrapper tags) is *entirely* one marker
+// placeholder and nothing else - the shape every own-line marker's dedicated line always has, thanks
+// to the `MARKER_WRAPPER_OPEN_TAG`/content-wrapper mechanisms above guaranteeing isolation. Used to
+// gate the `perltidy` reformatting path below, so it never fires for a marker embedded inline with
+// other text on the same line.
+const SOLE_MARKER_RE = new RegExp(`^${MARKER_OPEN}(\\d+)${MARKER_PAD}*${MARKER_CLOSE}$`);
 
 // Walks the fully-formatted HTML skeleton line by line: a line that (once trimmed) is exactly one of
 // the wrapper tags is pure scaffolding and is dropped outright. For the content wrapper, no manual
@@ -189,7 +229,19 @@ const substituteMarkers = (line: string, markerTexts: string[]): string =>
 // level of indent it also picked up canceled back out again (see its definition above), tracked via
 // a small stack since both wrappers share the same `</ol>` closing text. Every other line is left
 // exactly as HTML formatted it, with only its marker placeholders substituted back in.
-const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], indentUnit: string): string => {
+interface PerltidyContext {
+    perltidyrcPath: string | undefined;
+    useTabs: boolean;
+    tabWidth: number;
+    printWidth: number;
+}
+
+const stripWrappersAndSubstitute = async (
+    formatted: string,
+    markers: MarkerInfo[],
+    indentUnit: string,
+    perltidyContext: PerltidyContext
+): Promise<string> => {
     const lines = formatted.split('\n');
     const output: string[] = [];
     const stack: ('content' | 'marker' | 'inner')[] = [];
@@ -239,7 +291,48 @@ const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], in
         // indent level consumes), so slicing by character count would strip the wrong amount.
         for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); i++)
             indent = indent.slice(indentUnit.length);
-        output.push(line === '' ? '' : indent + substituteMarkers(content, markerTexts));
+
+        // A line that's *entirely* one reformat-eligible marker's placeholder (see `SOLE_MARKER_RE`
+        // and `MarkerInfo`) gets run through `perltidy` instead of the plain text substitution below.
+        // `depth` (how many `indentUnit`s deep this marker's own line sits) drives the brace-wrapping
+        // trick in `runPerltidy` that makes perltidy's own indentation/line-wrapping account for the
+        // surrounding HTML structure - see CLAUDE.local.md and src/mojo/perltidy.ts.
+        const soleMatch = SOLE_MARKER_RE.exec(content);
+        const marker = soleMatch ? markers[Number(soleMatch[1])] : undefined;
+        if (marker?.reformat) {
+            const { prefix, body, suffix } = marker.reformat;
+            const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
+            const perltidyLines = await runPerltidy(body, {
+                configPath: perltidyContext.perltidyrcPath,
+                depth,
+                useTabs: perltidyContext.useTabs,
+                tabWidth: perltidyContext.tabWidth,
+                printWidth: perltidyContext.printWidth
+            });
+            // A percent-line (`%=`/`%==`) marker can never safely become multi-line - Mojo::Template
+            // only treats a line as Perl if it starts with `%`, so a continuation line without one
+            // would be parsed as literal HTML output - so that combination is treated the same as a
+            // failed `perltidy` run: fall through to the raw-passthrough substitution below.
+            const isPercentForm = prefix.startsWith('%');
+            if (perltidyLines && !(isPercentForm && perltidyLines.length > 1)) {
+                const suffixPart = suffix ? ` ${suffix}` : '';
+                if (perltidyLines.length === 1) {
+                    output.push(`${indent}${prefix} ${perltidyLines[0]}${suffixPart}`);
+                } else {
+                    // Only the first line needs `indent` prepended (its own copy was stripped by
+                    // `runPerltidy` so it could be glued onto the delimiter instead) and the closing
+                    // delimiter is synthetic, not part of perltidy's output at all - every other line
+                    // already carries its full real indentation, `depth` levels deep, courtesy of the
+                    // brace-wrapping `runPerltidy` did; prepending `indent` again would double it.
+                    output.push(`${indent}${prefix} ${perltidyLines[0]}`);
+                    output.push(...perltidyLines.slice(1));
+                    output.push(`${indent}${suffix}`);
+                }
+                continue;
+            }
+        }
+
+        output.push(line === '' ? '' : indent + substituteMarkers(content, markers));
     }
 
     return output.join('\n');
@@ -253,7 +346,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
     if (path.node.type !== 'Program') return null;
 
     return async (textToDoc: (text: string, opts: Options) => Promise<Doc>): Promise<Doc> => {
-        const { skeleton, markerTexts } = buildSkeleton(path.node);
+        const { skeleton, markers } = buildSkeleton(path.node);
         const htmlDoc = await textToDoc(skeleton, { parser: 'html' });
         // By the time prettier actually calls embed(), `options` is the fully-resolved options
         // object (every field populated with its default), even though the declared `Options` type
@@ -262,7 +355,18 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
             htmlDoc,
             options as unknown as Parameters<typeof doc.printer.printDocToString>[1]
         );
-        const indentUnit = options.useTabs ? '\t' : ' '.repeat(options.tabWidth ?? 2);
-        return `${stripWrappersAndSubstitute(formatted, markerTexts, indentUnit)}\n`;
+        const tabWidth = options.tabWidth ?? 2;
+        const indentUnit = options.useTabs ? '\t' : ' '.repeat(tabWidth);
+        // Searched once per file (walking upward from the template's own directory, not relying on
+        // perltidy's own cwd-only/home-dir discovery) rather than once per marker - see
+        // src/mojo/perltidy.ts for why.
+        const perltidyrcPath = findPerltidyrc(dirname(options.filepath ?? process.cwd()));
+        const result = await stripWrappersAndSubstitute(formatted, markers, indentUnit, {
+            perltidyrcPath,
+            useTabs: options.useTabs ?? false,
+            tabWidth,
+            printWidth: options.printWidth ?? 80
+        });
+        return `${result}\n`;
     };
 };
