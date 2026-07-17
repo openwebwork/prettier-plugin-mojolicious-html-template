@@ -64,21 +64,30 @@ const percentLineIndent = (input: InputStream, offset: number): number => {
     return input.peek(offset + ws) === PERCENT ? ws : -1;
 };
 
+// True if the input position is a line start, tolerating any amount of preceding [ \t]* on that
+// same line (so it still reads as "line start" immediately after the leading-whitespace Text token
+// below has been consumed, not only right after a literal '\n').
+const isLineStart = (input: InputStream): boolean => {
+    let i = -1;
+    while (input.peek(i) === SPACE || input.peek(i) === TAB) i--;
+    const c = input.peek(i);
+    return c === NEWLINE || c === -1;
+};
+
 export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
     if (input.next === -1) return;
 
-    const atLineStart = input.pos === 0 || input.peek(-1) === NEWLINE;
-
-    // A standalone `%` control line, possibly indented: from the (optionally indented) `%` to the
-    // end of the line (excluding the newline and the leading whitespace itself).
-    if (atLineStart) {
-        const ws = percentLineIndent(input, 0);
-        if (ws !== -1) {
-            let offset = ws + 1;
-            while (input.peek(offset) !== NEWLINE && input.peek(offset) !== -1) offset++;
-            input.acceptToken(classify(sliceByPeek(input, ws + 1, offset)), offset);
-            return;
-        }
+    // A standalone `%` control line: from the `%` itself to the end of the line. Any leading
+    // indentation is *not* included here - see the leading-whitespace branch further down, which
+    // consumes it as its own Text token first so it lands in the surrounding HTML/Block context's
+    // indentation rather than being baked into the marker's own raw text (which would otherwise
+    // compound on every reformat, since the marker's stored text would include whatever indent the
+    // *previous* run had already added).
+    if (input.next === PERCENT && isLineStart(input)) {
+        let offset = 1;
+        while (input.peek(offset) !== NEWLINE && input.peek(offset) !== -1) offset++;
+        input.acceptToken(classify(sliceByPeek(input, 1, offset)), offset);
+        return;
     }
 
     // An inline `<% ... %>` tag, found in full on one lookahead scan.
@@ -96,6 +105,16 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
             return;
         }
         // No closing `%>` was found; fall through and treat the `<` as ordinary text.
+    }
+
+    // The [ \t]* indentation leading up to a percent-line, consumed as its own Text token so the
+    // marker branch above starts exactly at '%' on the next tokenizer call (see the comment there).
+    if ((input.next === SPACE || input.next === TAB) && isLineStart(input)) {
+        const ws = percentLineIndent(input, 0);
+        if (ws > 0) {
+            input.acceptToken(Text, ws);
+            return;
+        }
     }
 
     // Anything else is Text, up to (but not including) the start of the next marker - including
