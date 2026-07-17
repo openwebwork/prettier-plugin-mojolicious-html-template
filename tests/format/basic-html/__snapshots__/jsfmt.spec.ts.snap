@@ -4,14 +4,14 @@ exports[`basic.html.ep (mojolicious-html-template) 1`] = `
 "
 <!DOCTYPE html>
 <html>
-  <head>
-    <title>Test Page</title>
-  </head>
-  <body>
-    <div class="container">
-      <p>Hello, world!</p>
-    </div>
-  </body>
+    <head>
+        <title>Test Page</title>
+    </head>
+    <body>
+        <div class="container">
+            <p>Hello, world!</p>
+        </div>
+    </body>
 </html>
 "
 `;

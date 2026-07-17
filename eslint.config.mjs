@@ -5,7 +5,7 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 import stylistic from '@stylistic/eslint-plugin';
 
 export default [
-    { ignores: ['**/dist/*', 'src/pg.grammar.terms.js'] },
+    { ignores: ['**/dist/*', 'src/mojo/mojo.grammar.js', 'src/mojo/mojo.grammar.terms.js'] },
     { files: ['**/*.{js,mjs,cjs,ts}'] },
     pluginJs.configs.recommended,
     ...tseslint.configs.strictTypeChecked,

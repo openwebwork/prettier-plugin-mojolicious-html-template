@@ -1,0 +1,3 @@
+<% content_for css => begin %>
+    <%= stylesheet url_for_asset('index.css') =%>
+<% end %>

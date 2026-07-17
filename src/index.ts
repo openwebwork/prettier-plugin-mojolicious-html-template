@@ -1,18 +1,7 @@
-import { type Parser, type Plugin, type SupportLanguage, type AstPath, doc } from 'prettier';
-import { parsers as pretterHTMLParsers, printers as prettierHTMLPrinters } from 'prettier/plugins/html';
-
-interface Placeholder {
-    id: string;
-    original: string;
-}
-
-interface HtmlAstNode {
-    kind: string;
-    name?: string;
-    value?: string;
-}
-
-let placeholders: Placeholder[] = [];
+import type { Parser, Plugin, SupportLanguage } from 'prettier';
+import { parser as mojoParser } from './mojo/mojo.grammar.js';
+import { treeToAst, type MojoNode } from './mojo/ast.js';
+import { printMojoNode, embed } from './mojo/printer.js';
 
 export const languages: SupportLanguage[] = [
     {
@@ -23,53 +12,28 @@ export const languages: SupportLanguage[] = [
     }
 ];
 
-export const parsers: Record<string, Parser> = {
+export const parsers: Record<string, Parser<MojoNode>> = {
     'mojolicious-html-template': {
-        ...pretterHTMLParsers.html,
-
-        preprocess(text: string): string {
-            placeholders = [];
-            let modifiedText = text;
-
-            modifiedText = modifiedText.replace(/^([ \t]*)(%.*)$/gm, (match) => {
-                const id = `<!--MOJO_LINE_${placeholders.length.toString()}-->`;
-                placeholders.push({ id, original: match });
-                return id;
-            });
-
-            modifiedText = modifiedText.replace(/<%(?:==|=)?[\s\S]*?%>/g, (match) => {
-                const id = `<!--MOJO_BLOCK_${placeholders.length.toString()}-->`;
-                placeholders.push({ id, original: match });
-                return id;
-            });
-
-            return modifiedText;
-        },
-
-        astFormat: 'mojolicious-html-ast'
+        parse: (text) => treeToAst(mojoParser.parse(text), text),
+        astFormat: 'mojolicious-ast',
+        locStart: (node) => node.start,
+        locEnd: (node) => node.end
     }
 };
 
-const plugin: Plugin = {
+const plugin: Plugin<MojoNode> = {
     languages,
     parsers,
     printers: {
-        'mojolicious-html-ast': {
-            ...prettierHTMLPrinters.html,
-
-            print(path: AstPath<HtmlAstNode>, options, print) {
-                return doc.utils.mapDoc(prettierHTMLPrinters.html.print(path, options, print), (currentDoc) => {
-                    if (typeof currentDoc === 'string') {
-                        let updatedString = currentDoc;
-                        for (const placeholder of placeholders) {
-                            updatedString = updatedString.replaceAll(placeholder.id, placeholder.original);
-                        }
-                        return updatedString;
-                    }
-                    return currentDoc;
-                });
-            }
+        'mojolicious-ast': {
+            print: printMojoNode,
+            embed
         }
+    },
+    defaultOptions: {
+        // Match perltidy's default indent width so the HTML's own nesting and the templated Perl's
+        // control-flow nesting blend together using the same indent unit.
+        tabWidth: 4
     }
 };
 

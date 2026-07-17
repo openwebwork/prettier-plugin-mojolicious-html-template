@@ -1,0 +1,33 @@
+% layout 'default';
+% title 'Problem Renderer';
+
+% content_for css => begin
+    <%= stylesheet url_for_asset('index.css') =%>
+% end
+
+% content_for js => begin
+    <%= javascript url_for_asset('index.js'), type => 'module' =%>
+% end
+
+<div class="container my-3">
+    <div class="d-flex justify-content-center mb-3">
+        <%= file_field 'problem-file', class => 'form-control' =%>
+    </div>
+    <div class="input-group mb-3">
+        <%= label_for 'problem-seed' => 'Problem Seed', class => 'input-group-text' =%>
+        <%= text_field 'problem-seed' => config->{defaultProblemSeed}, class => 'form-control', id => 'problem-seed' =%>
+    </div>
+    <div class="d-flex justify-content-center mb-3 gap-3">
+        <button class="btn btn-primary" id="render-file" type="button" disabled>Render Problem</button>
+        <button class="btn btn-primary" id="show-me-another" type="button" disabled>Show Me Another</button>
+    </div>
+    <%= tag 'div',
+        id    => 'problem-container',
+        class => 'problem-container',
+        data  => {
+            user_id           => config->{userId},
+            problem_style_url => url_for('remote/problem.css'),
+            problem_url       => url_for('remote/problem.js')
+        }
+    =%>
+</div>

@@ -1,0 +1,13 @@
+@top Program { item* }
+
+item { Text | PlainMarker | Block }
+
+Block { OpenMarker item* (MidMarker item*)* CloseMarker }
+
+@external tokens tokenizeMojo from "./tokens.js" {
+    Text
+    OpenMarker
+    CloseMarker
+    MidMarker
+    PlainMarker
+}

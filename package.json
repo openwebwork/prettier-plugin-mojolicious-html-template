@@ -8,18 +8,24 @@
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "scripts": {
+        "generate-grammar": "lezer-generator src/mojo/mojo.grammar -o src/mojo/mojo.grammar.js",
+        "prebuild": "npm run generate-grammar",
         "build": "tsc",
         "watch": "tsc -w",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "lint": "eslint . --fix",
         "lint:check": "eslint .",
+        "pretest": "npm run generate-grammar",
         "test": "vitest run",
+        "pretest:watch": "npm run generate-grammar",
         "test:watch": "vitest",
+        "pretest:update": "npm run generate-grammar",
         "test:update": "vitest run --update"
     },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
+        "@lezer/generator": "^1.8.0",
         "@stylistic/eslint-plugin": "^5.10.0",
         "@types/node": "^26.1.0",
         "eslint": "^10.6.0",
@@ -32,5 +38,8 @@
     },
     "peerDependencies": {
         "prettier": "^3.9.4"
+    },
+    "dependencies": {
+        "@lezer/lr": "^1.4.10"
     }
 }
