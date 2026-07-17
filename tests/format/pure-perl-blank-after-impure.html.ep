@@ -1,0 +1,9 @@
+% content_for css => begin
+	<%= stylesheet getAssetURL($ce, 'js/Achievements/achievements.css') =%>
+% end
+%
+% # Exit if there is no global achievement data for this user.
+% unless (defined $c->{globalData}) {
+	<p><%= maketext(q{You don't have any Achievement data associated to you!}) =%></p>
+	% last;
+% }

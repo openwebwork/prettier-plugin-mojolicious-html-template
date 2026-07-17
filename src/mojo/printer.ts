@@ -257,32 +257,38 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     const visitSequence = (nodes: MojoNode[]) => {
         let i = 0;
         while (i < nodes.length) {
-            let j = i;
-            // The run's real extent ends right after the *last* eligible member seen so far, not
-            // wherever the lookahead scan below happens to stop - trailing whitespace-only `Text`
-            // nodes are only tentatively included while scanning ahead for a possible next eligible
-            // member; if none turns up, they must NOT be swept into the region (its body gets trimmed
-            // before being sent to perltidy, which would silently eat a blank-line separator meant to
-            // survive between the region and whatever ineligible node comes next - regressed exactly
-            // this way against `realistic-template.html.ep` during development).
-            let end = i;
-            while (j < nodes.length) {
-                const candidate = nodes[j];
-                // A blank line (whitespace-only `Text`, or a `%`-alone line - see `isBlankPercentLine`)
-                // is a connector, not an anchor: it can sit inside a region if real content surrounds
-                // it on both sides, but doesn't by itself justify pulling a run together, and - same
-                // reasoning as the trailing-whitespace note above - must not be swept in as *trailing*
-                // content off the end of an otherwise-anchored run.
-                if ((candidate.type === 'Text' && candidate.text.trim() === '') || isBlankPercentLine(candidate)) {
-                    j++;
-                } else if (isEligibleRegionMember(candidate)) {
-                    j++;
-                    end = j;
-                } else {
-                    break;
+            // A region is only ever started at a real anchor (`isEligibleRegionMember`) - never at a
+            // connector (whitespace `Text` or a `%`-alone blank line, see `isBlankPercentLine`). Without
+            // this gate, a leading connector sitting before the first anchor of an otherwise-eligible
+            // run would get swept into `nodes.slice(i, end)` anyway (since `i` doesn't move during the
+            // lookahead below), and the whole joined body gets `.trim()`med before being sent to
+            // perltidy - silently eating a blank-line separator that happened to land first in the
+            // slice, even though it's semantically no different from one sandwiched in the middle
+            // (regressed exactly this way, against a real template with a lone `%` line followed by a
+            // `%`-comment right after an *ineligible* `Block`, during development). A connector that
+            // isn't part of any region - because nothing eligible ever follows it, or because it's this
+            // kind of ineligible leading connector - just falls through to the ordinary per-node
+            // handling below, one node at a time, which already renders it correctly on its own.
+            if (isEligibleRegionMember(nodes[i])) {
+                let j = i;
+                // The run's real extent ends right after the *last* eligible member seen so far, not
+                // wherever the lookahead scan below happens to stop - trailing connectors are only
+                // tentatively included while scanning ahead for a possible next eligible member; if none
+                // turns up, they must NOT be swept into the region, symmetric to the leading-connector
+                // reasoning above (regressed this way too, against `realistic-template.html.ep`, during
+                // earlier development).
+                let end = i;
+                while (j < nodes.length) {
+                    const candidate = nodes[j];
+                    if ((candidate.type === 'Text' && candidate.text.trim() === '') || isBlankPercentLine(candidate)) {
+                        j++;
+                    } else if (isEligibleRegionMember(candidate)) {
+                        j++;
+                        end = j;
+                    } else {
+                        break;
+                    }
                 }
-            }
-            if (end > i) {
                 registerRegion(nodes.slice(i, end));
                 i = end;
                 continue;
