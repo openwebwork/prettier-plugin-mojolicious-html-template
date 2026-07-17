@@ -1,0 +1,13 @@
+%= form_for current_route, method => 'POST', begin
+	% if (0) {
+		<div>ignored</div>
+	% } else {
+		<div class="alert alert-primary card p-2 mb-2" role="alert">
+			<em>
+				<%= maketext(
+					'This set has a set-level proctor password to authorize logins. Enter the password below.')
+				=%>
+			</em>
+		</div>
+	% }
+% end

@@ -506,12 +506,22 @@ const stripWrappersAndSubstitute = async (
         if (marker?.reformat) {
             const { prefix, body, suffix } = marker.reformat;
             const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
+            // `runPerltidy`'s brace-wrapping accounts for the surrounding HTML indent, but perltidy
+            // itself has no idea this content is about to be glued onto a `<%=`/`=%>`-style delimiter
+            // afterward - its own `-l` budget is spent purely on Perl content. If the result collapses
+            // to one line, both `prefix` and `suffix` land on that same line; conservatively assuming
+            // that will happen (rather than trying to predict multi-line vs single-line before knowing
+            // the result) keeps the reconstructed line within `printWidth` either way - worst case, a
+            // marker that would have fit on one line with only `prefix`'s overhead wraps a little
+            // earlier than strictly necessary once `suffix` is also subtracted, which is a far smaller
+            // problem than the line quietly exceeding `printWidth` (found against two real templates).
+            const delimiterOverhead = prefix.length + 1 + (suffix ? suffix.length + 1 : 0);
             const perltidyLines = await runPerltidy(body, {
                 configPath: perltidyContext.perltidyrcPath,
                 depth,
                 useTabs: perltidyContext.useTabs,
                 tabWidth: perltidyContext.tabWidth,
-                printWidth: perltidyContext.printWidth
+                printWidth: Math.max(1, perltidyContext.printWidth - delimiterOverhead)
             });
             // A percent-line (`%=`/`%==`) marker can never safely become multi-line - Mojo::Template
             // only treats a line as Perl if it starts with `%`, so a continuation line without one
@@ -558,12 +568,15 @@ const stripWrappersAndSubstitute = async (
         // is here to prevent from creeping back in.
         if (marker?.region) {
             const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
+            // Every returned line gets `% ` prepended (2 columns) that perltidy's own `-l` budget never
+            // accounted for - same reasoning as the tag-form path above, just a fixed 2-column overhead
+            // applied uniformly instead of a delimiter-dependent one.
             const perltidyLines = await runPerltidy(marker.region.body, {
                 configPath: perltidyContext.perltidyrcPath,
                 depth,
                 useTabs: perltidyContext.useTabs,
                 tabWidth: perltidyContext.tabWidth,
-                printWidth: perltidyContext.printWidth
+                printWidth: Math.max(1, perltidyContext.printWidth - 2)
             });
             if (perltidyLines && perltidyLines.length > 0) {
                 for (const perltidyLine of perltidyLines) {
