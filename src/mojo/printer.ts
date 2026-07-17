@@ -567,11 +567,25 @@ const stripWrappersAndSubstitute = async (
                     const suffixPart = suffix ? ` ${suffix}` : '';
                     output.push(`${indent}${prefix} ${firstLine}${suffixPart}`);
                 } else {
-                    // The closing delimiter is synthetic, not part of perltidy's output at all, so
-                    // it's added fresh at the marker's own base `indent`.
+                    // The closing delimiter is synthetic, not part of perltidy's output at all. If the
+                    // last content line is back at the *same* depth as the first line - a closing
+                    // `)`/`}`/`]` that perltidy itself aligned back under where the call/structure
+                    // started, not a deeper continuation line - glue the delimiter onto it instead of
+                    // giving it its own line, the same way prettier itself collapses a multi-line tag's
+                    // closing `>` onto its last attribute line when there's nothing deeper to close
+                    // over. Only ever true for the very last line (an intermediate line at this depth
+                    // would mean the statement isn't actually done yet), so no risk of gluing early.
+                    const lastLine = perltidyLines[perltidyLines.length - 1];
+                    const lastLineIndent = /^\s*/.exec(lastLine)?.[0] ?? '';
                     output.push(`${indent}${prefix} ${firstLine}`);
-                    output.push(...perltidyLines.slice(1));
-                    output.push(`${indent}${suffix}`);
+                    output.push(...perltidyLines.slice(1, -1));
+                    if (lastLineIndent === firstLineIndent) {
+                        const suffixPart = suffix ? ` ${suffix}` : '';
+                        output.push(`${lastLine}${suffixPart}`);
+                    } else {
+                        output.push(lastLine);
+                        output.push(`${indent}${suffix}`);
+                    }
                 }
                 continue;
             }
