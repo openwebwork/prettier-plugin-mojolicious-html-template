@@ -1,0 +1,9 @@
+% my $x = 1;
+%
+% my $y = 2;
+% if ($x) {
+    % log->error('pure');
+% }
+%
+<p>Not pure</p>
+% my $z = 3;

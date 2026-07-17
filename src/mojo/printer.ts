@@ -85,11 +85,26 @@ const splitMarkerDelimiters = (text: string): { prefix: string; body: string; su
     return undefined;
 };
 
-// A bare `%` line - not tag-form, not `%=`/`%==` (the two mutually exclusive with this: both are
-// always recognized by `splitMarkerDelimiters`, so "PlainMarker, starts with `%`, and
-// `splitMarkerDelimiters` returned nothing" is exactly "bare `%` line").
+// A bare `%` line with real Perl content after it - not tag-form, not `%=`/`%==` (the two mutually
+// exclusive with this: both are always recognized by `splitMarkerDelimiters`, so "PlainMarker, starts
+// with `%`, and `splitMarkerDelimiters` returned nothing" is exactly "bare `%` line"), and not a
+// content-free `%`-alone line either (see `isBlankPercentLine` - handled separately, since it isn't
+// really Perl *code*, just a blank-line marker Mojolicious happens to require a literal `%` on).
 const isBarePercentLine = (node: MojoNode): boolean =>
-    node.type === 'PlainMarker' && node.text.startsWith('%') && splitMarkerDelimiters(node.text) === undefined;
+    node.type === 'PlainMarker' &&
+    node.text.startsWith('%') &&
+    splitMarkerDelimiters(node.text) === undefined &&
+    node.text.trim() !== '%';
+
+// A `%`-alone line (nothing but the control marker itself, no code after it - possibly with trailing
+// whitespace on the line, which `.trim()` absorbs). Mojolicious requires the literal `%` even on an
+// otherwise-blank line for it to read as "this is Perl, not template output", so this is this
+// templating format's equivalent of an ordinary blank line between statements - not a run-anchoring
+// member of a region (see `isEligibleRegionMember`), but a connector like whitespace `Text`: it can sit
+// *inside* a region (contributing a blank line, `flattenNode` below) without being what makes a region
+// eligible in the first place, and outside one it should render completely unchanged, which is exactly
+// what leaving it to the ordinary `registerMarker` passthrough path already does.
+const isBlankPercentLine = (node: MojoNode): boolean => node.type === 'PlainMarker' && node.text.trim() === '%';
 
 // True if `node` is a `Block` whose entire content - recursively - is nothing but bare `%` lines and
 // whitespace: every structural marker (Open/Mid/Close) is itself a bare `%` line (not tag-form), every
@@ -103,7 +118,7 @@ const isPureBlock = (node: MojoNode): boolean =>
     node.children.every((child) => {
         if (isStructuralMarker(child.type)) return child.text.startsWith('%') && !child.text.startsWith('<%');
         if (child.type === 'Text') return child.text.trim() === '';
-        if (child.type === 'PlainMarker') return isBarePercentLine(child);
+        if (child.type === 'PlainMarker') return isBarePercentLine(child) || isBlankPercentLine(child);
         if (child.type === 'Block') return isPureBlock(child);
         return false;
     });
@@ -115,16 +130,21 @@ const isPureBlock = (node: MojoNode): boolean =>
 const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(node) || isPureBlock(node);
 
 // Reconstructs the real Perl source a region's nodes represent, so the whole region can be sent to
-// `perltidy` as one ordinary program. Any marker (bare `%` line, or a structural Open/Mid/Close - both
-// are just "`%` + Perl text") contributes its text with the leading `%` stripped and trimmed, plus a
-// trailing newline. A `Block` recurses through its own children directly (in original source order,
-// interleaving its structural markers with their content exactly as `node.children` already does) -
-// its structural markers are handled by the marker case above, so this doesn't register anything, just
-// walks straight through to plain text. A whitespace-only `Text` node contributes one blank line if the
-// source had a real blank line there (2+ newlines) - letting `perltidy`'s own blank-line settings still
-// apply - or nothing for an ordinary line-to-line adjacency (a single newline).
+// `perltidy` as one ordinary program. Any marker with real content (bare `%` line, or a structural
+// Open/Mid/Close - both are just "`%` + Perl text") contributes its text with the leading `%` stripped
+// and trimmed, plus a trailing newline. A `Block` recurses through its own children directly (in
+// original source order, interleaving its structural markers with their content exactly as
+// `node.children` already does) - its structural markers are handled by the marker case above, so this
+// doesn't register anything, just walks straight through to plain text. A whitespace-only `Text` node
+// contributes one blank line if the source had a real blank line there (2+ newlines) - letting
+// `perltidy`'s own blank-line settings still apply - or nothing for an ordinary line-to-line adjacency
+// (a single newline); a `%`-alone line (`isBlankPercentLine`) always contributes one blank line
+// unconditionally, since the user wrote it specifically as a blank-line marker (there's no "was it
+// really blank" ambiguity the way there is for `Text`, which can't help spanning at least one newline
+// just by sitting between two markers).
 const flattenNode = (node: MojoNode): string => {
     if (node.type === 'Text') return node.text.split('\n').length > 2 ? '\n' : '';
+    if (isBlankPercentLine(node)) return '\n';
     if (node.type === 'Block') return node.children.map(flattenNode).join('');
     return `${node.text.slice(1).trim()}\n`;
 };
@@ -248,7 +268,12 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             let end = i;
             while (j < nodes.length) {
                 const candidate = nodes[j];
-                if (candidate.type === 'Text' && candidate.text.trim() === '') {
+                // A blank line (whitespace-only `Text`, or a `%`-alone line - see `isBlankPercentLine`)
+                // is a connector, not an anchor: it can sit inside a region if real content surrounds
+                // it on both sides, but doesn't by itself justify pulling a run together, and - same
+                // reasoning as the trailing-whitespace note above - must not be swept in as *trailing*
+                // content off the end of an otherwise-anchored run.
+                if ((candidate.type === 'Text' && candidate.text.trim() === '') || isBlankPercentLine(candidate)) {
                     j++;
                 } else if (isEligibleRegionMember(candidate)) {
                     j++;
@@ -450,7 +475,14 @@ const stripWrappersAndSubstitute = async (
         // them (including the first) keep the full real indent `runPerltidy` produced. `%` + a space is
         // inserted right after each line's own leading whitespace, matching the requested style
         // (`% #` for a comment, not the Mojolicious-docs `%#` shorthand - this falls out automatically
-        // since a comment line is just ordinary Perl text as far as this is concerned).
+        // since a comment line is just ordinary Perl text as far as this is concerned). A blank line in
+        // perltidy's output (from a `%`-alone separator - `flattenNode` - or its own blank-line
+        // collapsing) carries no indentation of its own at all, the way a genuinely empty line never
+        // does in any code formatter's output, so it gets the region's own base `indent` explicitly
+        // rather than trying to extract a "leading whitespace" that isn't there - and critically, no
+        // trailing space after the `%`, unlike a real content line: Mojolicious requires the marker but
+        // there's nothing to put after it, and a trailing space there is exactly the bug this comment
+        // is here to prevent from creeping back in.
         if (marker?.region) {
             const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
             const perltidyLines = await runPerltidy(marker.region.body, {
@@ -462,6 +494,10 @@ const stripWrappersAndSubstitute = async (
             });
             if (perltidyLines && perltidyLines.length > 0) {
                 for (const perltidyLine of perltidyLines) {
+                    if (perltidyLine === '') {
+                        output.push(`${indent}%`);
+                        continue;
+                    }
                     const leading = /^\s*/.exec(perltidyLine)?.[0] ?? '';
                     output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
                 }
