@@ -440,6 +440,28 @@ interface PerltidyContext {
     printWidth: number;
 }
 
+// A closing `</ol>` is textually indistinguishable from our own wrapper's closing tag - closing tags
+// can't carry a disambiguating attribute the way `WRAPPER_OPEN_TAG`/`MARKER_WRAPPER_OPEN_TAG` do on the
+// opening side - so a genuine `<ol>` the template's own HTML happens to contain (found in a real
+// template: `<ol class="list-group ...">`) previously had its closing tag silently dropped, since every
+// `</ol>` was unconditionally treated as ours. Fixed by a whole-document, order-preserving scan *before*
+// the line-by-line walk below: `<ol>` unconditionally forces its children onto their own line regardless
+// of who authored it (verified empirically, including nested inside our own wrapper), so every `<ol>`'s
+// own open/close tags land on dedicated lines just like ours do, making a simple stack-based pairing scan
+// reliable - `[^<>]*` (not `.`) so it still matches an opening tag whose attributes happen to wrap across
+// multiple lines. Returns, in the order `</ol>` occurrences appear in `formatted`, whether each one
+// closes one of our own wrapper opens (`true`) or a real one from the template (`false`).
+const OL_TAG_RE = /<ol(?:\s[^<>]*)?>|<\/ol>/g;
+const classifyOlCloses = (formatted: string): boolean[] => {
+    const closes: boolean[] = [];
+    const stack: boolean[] = [];
+    for (const match of formatted.matchAll(OL_TAG_RE)) {
+        if (match[0] === WRAPPER_CLOSE_TAG) closes.push(stack.pop() ?? false);
+        else stack.push(match[0] === WRAPPER_OPEN_TAG || match[0] === MARKER_WRAPPER_OPEN_TAG);
+    }
+    return closes;
+};
+
 const stripWrappersAndSubstitute = async (
     formatted: string,
     markers: MarkerInfo[],
@@ -449,13 +471,21 @@ const stripWrappersAndSubstitute = async (
     const lines = formatted.split('\n');
     const output: string[] = [];
     const stack: ('content' | 'marker' | 'inner')[] = [];
+    const olCloseIsOurs = classifyOlCloses(formatted);
+    let olCloseIndex = 0;
 
     const emptySeparator = WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
 
     for (const line of lines) {
         const trimmed = line.trim();
 
-        if (trimmed === emptySeparator) continue; // empty content-wrapper separator, collapsed onto one line
+        if (trimmed === emptySeparator) {
+            // This line's own `</ol>` is ours by construction (its `<ol data-mojo-wrapper>` half is
+            // unambiguous), but it still counts as one of the `</ol>` occurrences `classifyOlCloses`
+            // found - consume its slot so `olCloseIndex` stays aligned with subsequent ones.
+            olCloseIndex++;
+            continue; // empty content-wrapper separator, collapsed onto one line
+        }
         if (trimmed === WRAPPER_OPEN_TAG) {
             stack.push('content');
             continue;
@@ -468,7 +498,18 @@ const stripWrappersAndSubstitute = async (
             stack.push('inner');
             continue;
         }
-        if (trimmed === WRAPPER_CLOSE_TAG || trimmed === CONTENT_INNER_CLOSE_TAG) {
+        if (trimmed === WRAPPER_CLOSE_TAG) {
+            // Default to "not ours" (keep the line) on an unexpected index mismatch - silently keeping
+            // an extra line is far less harmful than silently dropping a genuine closing tag.
+            const isOurs = olCloseIsOurs[olCloseIndex++] ?? false;
+            if (isOurs) {
+                stack.pop();
+                continue;
+            }
+            // A genuine `</ol>` the template's own HTML contains - fall through to the normal line
+            // handling below so it's kept (with indent/marker substitution applied like any other
+            // line), not dropped the way every `</ol>` used to be treated unconditionally.
+        } else if (trimmed === CONTENT_INNER_CLOSE_TAG) {
             stack.pop();
             continue;
         }

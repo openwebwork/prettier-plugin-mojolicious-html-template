@@ -1,0 +1,13 @@
+% if ($showList) {
+	<div id="set-list-container">
+		<ol class="list-group mb-3 invisible">
+			% for my $item (@items) {
+				<li><%= $item %></li>
+			% }
+		</ol>
+	</div>
+% }
+%
+<ol class="another-real-list">
+	<li>static</li>
+</ol>
