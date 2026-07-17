@@ -1,0 +1,4 @@
+<div><%= maketext(q{User's username is:}) %> <strong><%= param('effectiveUser') // '' %></strong></div>
+<div><%= maketext(qq{Value is "$x"}) %></div>
+% use WeBWorK::Utils qw(getAssetURL wwRound);
+<div><%= q(nested (parens) work too) %></div>

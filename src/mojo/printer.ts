@@ -149,6 +149,23 @@ const collapseBlankPercentRuns = (nodes: MojoNode[]): MojoNode[] => {
     return result;
 };
 
+// A closing HTML tag immediately followed by something that's neither whitespace nor the start of
+// another tag - the shape that triggers `<ol>`'s mid-tag-split quirk (see `CONTENT_INNER_OPEN_TAG`).
+const GLUED_CLOSE_TAG_RE = /<\/[a-zA-Z][\w-]*>(?=[^\s<])/;
+
+// True if a Block's content (`group` in `flush` below) contains the specific pattern
+// `CONTENT_INNER_OPEN_TAG`/`<address data-mojo-inner>` exists to work around: a real HTML closing tag
+// glued (no whitespace) to bare trailing content. Builds a lightweight flattened string - `Text` nodes
+// contribute their raw text verbatim, every `PlainMarker`/nested `Block` contributes a single opaque
+// non-whitespace placeholder character, since a marker glued directly to a closing tag is exactly as
+// risky as bare text would be - and tests it against `GLUED_CLOSE_TAG_RE`. Deliberately whole-group
+// rather than scoped to only direct children of the eventual `<ol>`: a nested `Block` is treated the
+// same as a marker (opaque, assumed risky if glued) rather than trying to reason about whether the
+// quirk can propagate through one, since erring toward *keeping* the protection in an ambiguous case
+// only costs one indent level, while erring the other way reintroduces the mid-tag-split bug.
+const needsGluedTagProtection = (nodes: MojoNode[]): boolean =>
+    GLUED_CLOSE_TAG_RE.test(nodes.map((node) => (node.type === 'Text' ? node.text : 'X')).join(''));
+
 // True if `node` is a `Block` whose entire content - recursively - is nothing but bare `%` lines and
 // whitespace: every structural marker (Open/Mid/Close) is itself a bare `%` line (not tag-form), every
 // `PlainMarker` child is a bare `%` line, every `Text` child is whitespace-only, and every nested
@@ -356,9 +373,15 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             let group: MojoNode[] = [];
             const flush = () => {
                 if (group.length === 0) return;
-                skeleton += WRAPPER_OPEN_TAG + CONTENT_INNER_OPEN_TAG;
+                // The inner wrapper adds a real (later-canceled) indent level of its own, which - when
+                // a Block is nested inside another Block - compounds with every ancestor's own inner
+                // wrapper and inflates prettier's fits/width computation for the whole subtree well
+                // beyond its real final depth, even though none of that extra depth survives to the
+                // output. Only pay for it when this content actually needs the protection.
+                const needsInner = needsGluedTagProtection(group);
+                skeleton += WRAPPER_OPEN_TAG + (needsInner ? CONTENT_INNER_OPEN_TAG : '');
                 visitSequence(group);
-                skeleton += CONTENT_INNER_CLOSE_TAG + WRAPPER_CLOSE_TAG;
+                skeleton += (needsInner ? CONTENT_INNER_CLOSE_TAG : '') + WRAPPER_CLOSE_TAG;
                 group = [];
             };
 

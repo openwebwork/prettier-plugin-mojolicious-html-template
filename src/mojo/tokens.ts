@@ -12,13 +12,68 @@ const HASH = 35; // '#'
 const SINGLE_QUOTE = 39; // "'"
 const DOUBLE_QUOTE = 34; // '"'
 const BACKSLASH = 92; // '\\'
+const LOWER_Q = 113; // 'q'
+const LOWER_W = 119; // 'w'
+const LOWER_R = 114; // 'r'
+
+const isIdentChar = (c: number): boolean =>
+    (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95; // a-z A-Z 0-9 _
+
+// Perl's bracket-style quote delimiters nest (`q{ a { nested } brace }` is one string), so the matching
+// close is looked up here; every other delimiter character closes with itself (`q!...!`, `q#...#`, etc).
+const QUOTE_LIKE_CLOSERS: Partial<Record<number, number>> = {
+    40: 41, // ( )
+    123: 125, // { }
+    91: 93, // [ ]
+    60: 62 // < >
+};
+
+// If a Perl quote-like operator (`q`, `qq`, `qw`, or `qr` - the ones with a single delimited region,
+// unlike `s///`/`tr///` which take two and aren't handled here) starts at `offset`, returns the offset
+// just past its matching closing delimiter, honoring Perl's nesting rule for bracket-style delimiters.
+// Otherwise returns `offset` unchanged. This keeps a literal quote character *inside* one of these
+// constructs - e.g. the apostrophe in `q{User's name}` - from being mistaken by `skipStringOrComment`'s
+// own quote handling for the start of an ordinary Perl string, which would otherwise scan for a
+// "closing" quote unrelated to it and swallow real `%>` tag boundaries in between.
+const skipQuoteLikeOperator = (input: InputStream, offset: number): number => {
+    if (offset > 0 && isIdentChar(input.peek(offset - 1))) return offset; // e.g. the "q" in "req"
+    if (input.peek(offset) !== LOWER_Q) return offset;
+
+    let o = offset + 1;
+    const second = input.peek(o);
+    if (second === LOWER_Q || second === LOWER_W || second === LOWER_R) o++; // qq, qw, qr
+
+    while (input.peek(o) === SPACE || input.peek(o) === TAB || input.peek(o) === NEWLINE) o++;
+
+    const startDelim = input.peek(o);
+    if (startDelim < 0 || isIdentChar(startDelim) || startDelim === SPACE || startDelim === TAB) return offset;
+    o++;
+
+    const endDelim = QUOTE_LIKE_CLOSERS[startDelim] ?? startDelim;
+    let depth = 1;
+    while (depth > 0) {
+        const c = input.peek(o);
+        if (c === -1) return offset; // unterminated - bail rather than scanning past end of input
+        if (c === BACKSLASH) {
+            o += 2;
+            continue;
+        }
+        if (endDelim !== startDelim && c === startDelim) depth++;
+        else if (c === endDelim) depth--;
+        o++;
+    }
+    return o;
+};
 
 // If a Perl string (single- or double-quoted, following the same shape as codemirror-lang-perl's
-// `StringSingleQuoted`/`StringDoubleQuoted` tokens) or a `#` comment starts at `offset`, returns the
-// offset just past it (end of the closing quote, or end of line for a comment). Otherwise returns
-// `offset` unchanged. This keeps a literal `%>` inside a string like `<%= "50%>" %>` from being
-// mistaken for the tag's real closing delimiter.
+// `StringSingleQuoted`/`StringDoubleQuoted` tokens), a quote-like operator (see
+// `skipQuoteLikeOperator`), or a `#` comment starts at `offset`, returns the offset just past it.
+// Otherwise returns `offset` unchanged. This keeps a literal `%>` inside a string like `<%= "50%>" %>`
+// from being mistaken for the tag's real closing delimiter.
 const skipStringOrComment = (input: InputStream, offset: number): number => {
+    const quoteLike = skipQuoteLikeOperator(input, offset);
+    if (quoteLike !== offset) return quoteLike;
+
     const c = input.peek(offset);
     if (c === HASH) {
         let o = offset + 1;

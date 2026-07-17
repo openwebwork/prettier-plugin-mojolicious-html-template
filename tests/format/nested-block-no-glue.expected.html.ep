@@ -1,0 +1,11 @@
+%= form_for current_route, method => 'POST', begin
+	% if (1) {
+		<div class="alert alert-primary card p-2 mb-2" role="alert">
+			<div><%= maketext(q{User's username is:}) %> <strong><%= param('effectiveUser') // '' %></strong></div>
+			<div>
+				<%= maketext(q{User's name is:}) %>
+				<strong><%= $c->{effectiveUser}->first_name %> <%= $c->{effectiveUser}->last_name %></strong>
+			</div>
+		</div>
+	% }
+% end
