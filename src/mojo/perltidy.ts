@@ -71,27 +71,56 @@ const spawnPerltidy = (args: string[], input: string): Promise<{ code: number | 
 export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): Promise<string[] | null> => {
     const { configPath, depth, useTabs, tabWidth, printWidth } = opts;
 
-    const braces = (char: string) => Array.from({ length: depth }, () => char).join('\n');
-    const input = depth === 0 ? perlCode : `${braces('{')}\n${perlCode}\n${braces('}')}\n`;
+    // Each synthetic opening brace is followed by a lone `#` comment line - a profile with `-wn` set
+    // (the real target project's does) otherwise welds a chain of adjacent single-statement-block
+    // braces onto one shared line (`{ { {`) and under-indents the wrapped content, silently defeating
+    // the whole depth-counting trick (verified: depth-2 wrapping produced only 1 tab of indent with
+    // plain `-wn` active). A comment immediately after `{` can't share its line with anything else -
+    // comments run to end of line - so the next `{` is forced onto a new line, which prevents welding
+    // without touching `-wn` itself: the closing braces, left untouched, stay one-per-line too (welding
+    // is symmetric on the open/close chain, verified empirically). This was previously done with
+    // `-wnxl='^W{'` (a weld-nested-exclusion-list entry targeting exactly this plugin's own braces), but
+    // that's a global CLI override: a target project's own `.perltidyrc` could set its own `-wnxl` for
+    // its own reasons, and the CLI flag would silently clobber it rather than merge with it. The comment
+    // trick needs no `perltidy` option at all, so it can't conflict with anything a profile sets.
+    const openBraces = depth === 0 ? '' : Array.from({ length: depth }, () => '{\n#').join('\n');
+    const closeBraces = depth === 0 ? '' : Array.from({ length: depth }, () => '}').join('\n');
+    const input = depth === 0 ? perlCode : `${openBraces}\n${perlCode}\n${closeBraces}\n`;
 
     // `-l=<printWidth>` is passed either way (even alongside a discovered `.perltidyrc`) so wrapping
     // decisions are always tied to prettier's actual resolved printWidth, not merely assumed to match
-    // whatever the profile happens to set. `-nwn` (disable "weld nested containers") is required
-    // regardless of a discovered config: a `.perltidyrc` with `-wn` set (the real target project's
-    // does) collapses the synthetic braces onto shared lines and under-indents the wrapped content,
-    // defeating the depth-counting trick this relies on (verified empirically).
+    // whatever the profile happens to set.
     const l = printWidth.toString();
     const i = tabWidth.toString();
     const args = configPath
-        ? [`-pro=${configPath}`, `-l=${l}`, '-nwn', '-st', '-se']
-        : ['-npro', `-l=${l}`, `-i=${i}`, `-ci=${i}`, '-xci', '-nwn', '-st', '-se', useTabs ? `-et=${i}` : '-nt'];
+        ? [`-pro=${configPath}`, `-l=${l}`, '-st', '-se']
+        : ['-npro', `-l=${l}`, `-i=${i}`, `-ci=${i}`, '-xci', '-st', '-se', useTabs ? `-et=${i}` : '-nt'];
 
-    const { code, stdout } = await spawnPerltidy(args, input);
-    if (code !== 0) return null;
+    // `perltidy`'s own output isn't always a fixed point of itself in a single pass when a `-wn`
+    // welding decision sits right at a width boundary - verified empirically against a real
+    // construct in `links.html.ep` (a ternary with `: b(maketext(...))` on the longer arm): the first
+    // pass over raw source leaves `b(` and `maketext(` un-welded (each gets its own line), but feeding
+    // that exact output back through `perltidy` a second time welds them onto one line, and a third
+    // pass then reproduces the second pass's output unchanged (i.e. the *second* pass's result is the
+    // real fixed point, not the first). Re-running until two consecutive passes agree (bounded, since
+    // this is a narrow boundary case and real content converges within a couple of iterations) means
+    // this function always returns output that's stable under repeated formatting, which is what every
+    // caller - and the plugin's own idempotency guarantee - actually needs.
+    let text = input;
+    let stdout = '';
+    for (let iteration = 0; iteration < 4; iteration++) {
+        const result = await spawnPerltidy(args, text);
+        if (result.code !== 0) return null;
+        stdout = result.stdout;
+        if (stdout.replace(/\n$/, '') === text.replace(/\n$/, '')) break;
+        text = stdout;
+    }
 
     const lines = stdout.replace(/\n$/, '').split('\n');
     if (depth === 0) return lines;
 
-    const content = lines.slice(depth, lines.length - depth);
+    // The opening wrapper contributes two lines per depth level (`{` and its `#` comment); the
+    // closing wrapper contributes one (`}`).
+    const content = lines.slice(depth * 2, lines.length - depth);
     return content.length === 0 ? null : content;
 };
