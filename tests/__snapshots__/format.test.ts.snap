@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`basic.html.ep (mojolicious-html-template) 1`] = `
+exports[`basic-html.html.ep 1`] = `
 "
 <!DOCTYPE html>
 <html>
@@ -13,5 +13,16 @@ exports[`basic.html.ep (mojolicious-html-template) 1`] = `
         </div>
     </body>
 </html>
+"
+`;
+
+exports[`inline-blocks.html.ep 1`] = `
+"
+<div class="greeting">
+    <p>Hello, <%= $name %>!</p>
+    <p><%== $rawHtml %></p>
+    <% my $count = scalar(@items); %>
+    <p>You have <%= $count %> items.</p>
+</div>
 "
 `;
