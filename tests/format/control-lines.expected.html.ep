@@ -1,4 +1,4 @@
-% my @items = (1, 2, 3);
+% my @items = ( 1, 2, 3 );
 <ul>
     % for my $item (@items) {
         <li><%= $item %></li>

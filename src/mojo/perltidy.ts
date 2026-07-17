@@ -63,9 +63,11 @@ const spawnPerltidy = (args: string[], input: string): Promise<{ code: number | 
 // `depth` nested bare Perl blocks before being sent to `perltidy`, which then indents the content by
 // exactly `depth` levels (using its own configured indent character/width) and wraps long lines with
 // that real indentation already factored in. Returns the reformatted lines with the synthetic wrapper
-// already stripped and the first line's own indent already stripped too (the caller glues it onto the
-// marker's opening delimiter instead) - or `null` if `perltidy` isn't available or fails, so the
-// caller can fall back to raw passthrough for that one marker.
+// already stripped - every line keeps its own full real indent exactly as `perltidy` produced it (a
+// caller that needs the first line's indent stripped, to glue it onto a delimiter instead of leaving it
+// on its own line, does that itself - see `stripWrappersAndSubstitute`'s tag-form marker path) - or
+// `null` if `perltidy` isn't available or fails, so the caller can fall back to raw passthrough for that
+// one marker/region.
 export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): Promise<string[] | null> => {
     const { configPath, depth, useTabs, tabWidth, printWidth } = opts;
 
@@ -91,13 +93,5 @@ export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): P
     if (depth === 0) return lines;
 
     const content = lines.slice(depth, lines.length - depth);
-    if (content.length === 0) return null;
-
-    const indentUnit = useTabs ? '\t' : ' '.repeat(tabWidth);
-    const firstLineIndent = indentUnit.repeat(depth);
-    content[0] = content[0].startsWith(firstLineIndent)
-        ? content[0].slice(firstLineIndent.length)
-        : content[0].trimStart();
-
-    return content;
+    return content.length === 0 ? null : content;
 };

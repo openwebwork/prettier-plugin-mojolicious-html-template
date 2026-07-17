@@ -1,0 +1,6 @@
+<div class="outer">
+    % my $x = 1;
+    % if ($x) {
+        % log->error('a');
+    % }
+</div>

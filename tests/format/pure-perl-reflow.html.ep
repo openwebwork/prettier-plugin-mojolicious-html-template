@@ -1,0 +1,2 @@
+% my $var
+    % = 'long value that does not fit onto above line';

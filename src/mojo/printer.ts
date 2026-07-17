@@ -66,6 +66,7 @@ const CONTENT_INNER_CLOSE_TAG = '</address>';
 interface MarkerInfo {
     text: string;
     reformat?: { prefix: string; body: string; suffix: string };
+    region?: { body: string };
 }
 
 // Splits a reformat-eligible own-line `PlainMarker`'s raw text into its delimiter and body, or
@@ -82,6 +83,59 @@ const splitMarkerDelimiters = (text: string): { prefix: string; body: string; su
         return { prefix, body: text.slice(prefix.length).trim(), suffix: '' };
     }
     return undefined;
+};
+
+// A bare `%` line - not tag-form, not `%=`/`%==` (the two mutually exclusive with this: both are
+// always recognized by `splitMarkerDelimiters`, so "PlainMarker, starts with `%`, and
+// `splitMarkerDelimiters` returned nothing" is exactly "bare `%` line").
+const isBarePercentLine = (node: MojoNode): boolean =>
+    node.type === 'PlainMarker' && node.text.startsWith('%') && splitMarkerDelimiters(node.text) === undefined;
+
+// True if `node` is a `Block` whose entire content - recursively - is nothing but bare `%` lines and
+// whitespace: every structural marker (Open/Mid/Close) is itself a bare `%` line (not tag-form), every
+// `PlainMarker` child is a bare `%` line, every `Text` child is whitespace-only, and every nested
+// `Block` child is itself fully pure. A single tag-form marker, `%=`/`%==` marker, or literal
+// non-whitespace HTML text anywhere inside - at any depth - disqualifies the *whole* enclosing `Block`,
+// since reconstructing it into one balanced Perl program (`flattenNode` below) requires every piece of
+// its content to actually be Perl.
+const isPureBlock = (node: MojoNode): boolean =>
+    node.type === 'Block' &&
+    node.children.every((child) => {
+        if (isStructuralMarker(child.type)) return child.text.startsWith('%') && !child.text.startsWith('<%');
+        if (child.type === 'Text') return child.text.trim() === '';
+        if (child.type === 'PlainMarker') return isBarePercentLine(child);
+        if (child.type === 'Block') return isPureBlock(child);
+        return false;
+    });
+
+// A node that's safe to fold into a "pure-Perl region" (see `registerRegion`) alongside its adjacent
+// siblings: a lone bare `%` line, or a whole `Block` that's fully pure per `isPureBlock`. Whichever it
+// is, it's guaranteed syntactically complete once every other member of its region is included too -
+// see the "reconstruct, tidy, re-split" reasoning in CLAUDE.local.md.
+const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(node) || isPureBlock(node);
+
+// Reconstructs the real Perl source a region's nodes represent, so the whole region can be sent to
+// `perltidy` as one ordinary program. Any marker (bare `%` line, or a structural Open/Mid/Close - both
+// are just "`%` + Perl text") contributes its text with the leading `%` stripped and trimmed, plus a
+// trailing newline. A `Block` recurses through its own children directly (in original source order,
+// interleaving its structural markers with their content exactly as `node.children` already does) -
+// its structural markers are handled by the marker case above, so this doesn't register anything, just
+// walks straight through to plain text. A whitespace-only `Text` node contributes one blank line if the
+// source had a real blank line there (2+ newlines) - letting `perltidy`'s own blank-line settings still
+// apply - or nothing for an ordinary line-to-line adjacency (a single newline).
+const flattenNode = (node: MojoNode): string => {
+    if (node.type === 'Text') return node.text.split('\n').length > 2 ? '\n' : '';
+    if (node.type === 'Block') return node.children.map(flattenNode).join('');
+    return `${node.text.slice(1).trim()}\n`;
+};
+
+// Builds the placeholder text for a marker/region: a unique id padded out to roughly `firstLineLength`
+// so prettier's HTML printer makes realistic fits/line-wrap decisions - see `registerMarker`'s longer
+// explanation, which this factors out of (both it and `registerRegion` need the same computation).
+const makePlaceholder = (id: number, firstLineLength: number): string => {
+    const overhead = MARKER_OPEN.length + id.toString().length + MARKER_CLOSE.length;
+    const padding = MARKER_PAD.repeat(Math.max(0, firstLineLength - overhead));
+    return `${MARKER_OPEN}${id.toString()}${padding}${MARKER_CLOSE}`;
 };
 
 interface Skeleton {
@@ -128,10 +182,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // substituted back in regardless of what surrounding elements decided, and padding out to the
         // *total* character count (across every line) would wildly overstate how long any single
         // rendered line actually is.
-        const firstLine = node.text.split('\n', 1)[0];
-        const overhead = MARKER_OPEN.length + id.toString().length + MARKER_CLOSE.length;
-        const padding = MARKER_PAD.repeat(Math.max(0, firstLine.length - overhead));
-        const placeholder = `${MARKER_OPEN}${id.toString()}${padding}${MARKER_CLOSE}`;
+        const placeholder = makePlaceholder(id, node.text.split('\n', 1)[0].length);
 
         // A bare placeholder is just plain text as far as HTML is concerned, and prettier's HTML
         // printer reflows plain text to fit the available width regardless of how it looked in the
@@ -148,25 +199,80 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                 : placeholder;
     };
 
+    // Registers a maximal run of `isEligibleRegionMember` siblings (see that function and
+    // `flattenNode`) as one combined `perltidy` unit, using the same own-line marker-wrapper mechanism
+    // `registerMarker` uses for a single own-line `PlainMarker` - a region can never be embedded inline
+    // with surrounding text, since bare `%` lines and `Block`s are always own-line by construction.
+    const registerRegion = (nodes: MojoNode[]) => {
+        const id = counter++;
+        // A leading/trailing whitespace-only `Text` node absorbed into the run (e.g. the newline right
+        // after the enclosing marker's own line) would otherwise leave a bare newline at the very start
+        // or end of the fallback text, producing a spurious blank line when substituted back in on the
+        // `perltidy`-failure path - trimmed for the same reason `body` is.
+        const text = nodes
+            .map((n) => n.text)
+            .join('')
+            .trim();
+        markers[id] = { text, region: { body: nodes.map(flattenNode).join('').trim() } };
+        const placeholder = makePlaceholder(id, text.split('\n', 1)[0].length);
+        skeleton += `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
+    };
+
     // A run of sibling nodes - either a Block's whole child list, or the content between two of a
-    // Block's markers. A `Text` node here that's nothing but whitespace spanning a newline is purely
-    // structural (there to preserve line breaks/blank lines between Mojo markers that don't
-    // themselves sit inside any real HTML tag), and by construction of the tokenizer can only occur
-    // adjacent to markers/blocks in the first place (a real HTML-to-HTML gap never becomes its own
-    // Text node - it stays part of one continuous run). Left alone, prettier's HTML printer treats
-    // such a run as ordinary reflowable prose and collapses every line onto one, so an empty wrapper
-    // is spliced in to anchor the boundary - it's dropped again during substitution, contributing
-    // nothing to the final output but forcing HTML to preserve the surrounding line breaks.
+    // Block's markers. Scans for maximal runs of `isEligibleRegionMember` nodes (interspersed only by
+    // whitespace `Text`) first, registering each as one region; everything else falls through to the
+    // per-node handling below, exactly as before this phase existed - including an *ineligible*
+    // `Block`, which still recurses via `visitNode` -> `flush` -> `visitSequence(group)`, so this same
+    // scan runs again on its content and still finds a pure-Perl `Block` nested inside an otherwise
+    // mixed one.
+    //
+    // A `Text` node that's nothing but whitespace spanning a newline, and isn't part of a registered
+    // region, is purely structural (there to preserve line breaks/blank lines between Mojo markers that
+    // don't themselves sit inside any real HTML tag), and by construction of the tokenizer can only
+    // occur adjacent to markers/blocks in the first place (a real HTML-to-HTML gap never becomes its own
+    // Text node - it stays part of one continuous run). Left alone, prettier's HTML printer treats such
+    // a run as ordinary reflowable prose and collapses every line onto one, so an empty wrapper is
+    // spliced in to anchor the boundary - it's dropped again during substitution, contributing nothing
+    // to the final output but forcing HTML to preserve the surrounding line breaks.
     const visitSequence = (nodes: MojoNode[]) => {
-        for (const node of nodes) {
+        let i = 0;
+        while (i < nodes.length) {
+            let j = i;
+            // The run's real extent ends right after the *last* eligible member seen so far, not
+            // wherever the lookahead scan below happens to stop - trailing whitespace-only `Text`
+            // nodes are only tentatively included while scanning ahead for a possible next eligible
+            // member; if none turns up, they must NOT be swept into the region (its body gets trimmed
+            // before being sent to perltidy, which would silently eat a blank-line separator meant to
+            // survive between the region and whatever ineligible node comes next - regressed exactly
+            // this way against `realistic-template.html.ep` during development).
+            let end = i;
+            while (j < nodes.length) {
+                const candidate = nodes[j];
+                if (candidate.type === 'Text' && candidate.text.trim() === '') {
+                    j++;
+                } else if (isEligibleRegionMember(candidate)) {
+                    j++;
+                    end = j;
+                } else {
+                    break;
+                }
+            }
+            if (end > i) {
+                registerRegion(nodes.slice(i, end));
+                i = end;
+                continue;
+            }
+
+            const node = nodes[i];
             if (node.type === 'Text') {
                 skeleton += node.text;
                 if (node.text.trim() === '' && node.text.includes('\n')) {
                     skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
                 }
-                continue;
+            } else {
+                visitNode(node);
             }
-            visitNode(node);
+            i++;
         }
     };
 
@@ -315,18 +421,49 @@ const stripWrappersAndSubstitute = async (
             // failed `perltidy` run: fall through to the raw-passthrough substitution below.
             const isPercentForm = prefix.startsWith('%');
             if (perltidyLines && !(isPercentForm && perltidyLines.length > 1)) {
-                const suffixPart = suffix ? ` ${suffix}` : '';
+                // Unlike a region (below), a reformatted tag-form marker's first line gets glued onto
+                // its opening delimiter instead of staying on its own line, so its own
+                // `depth`-levels-of-indent (which `runPerltidy` leaves intact on every line, including
+                // when the whole result is only one line) needs stripping here before gluing - every
+                // *other* line keeps its full real indentation, `depth` levels deep, courtesy of the
+                // brace-wrapping `runPerltidy` did; prepending `indent` again would double it.
+                const firstLineIndent = indentUnit.repeat(depth);
+                const firstLine = perltidyLines[0].startsWith(firstLineIndent)
+                    ? perltidyLines[0].slice(firstLineIndent.length)
+                    : perltidyLines[0].trimStart();
                 if (perltidyLines.length === 1) {
-                    output.push(`${indent}${prefix} ${perltidyLines[0]}${suffixPart}`);
+                    const suffixPart = suffix ? ` ${suffix}` : '';
+                    output.push(`${indent}${prefix} ${firstLine}${suffixPart}`);
                 } else {
-                    // Only the first line needs `indent` prepended (its own copy was stripped by
-                    // `runPerltidy` so it could be glued onto the delimiter instead) and the closing
-                    // delimiter is synthetic, not part of perltidy's output at all - every other line
-                    // already carries its full real indentation, `depth` levels deep, courtesy of the
-                    // brace-wrapping `runPerltidy` did; prepending `indent` again would double it.
-                    output.push(`${indent}${prefix} ${perltidyLines[0]}`);
+                    // The closing delimiter is synthetic, not part of perltidy's output at all, so
+                    // it's added fresh at the marker's own base `indent`.
+                    output.push(`${indent}${prefix} ${firstLine}`);
                     output.push(...perltidyLines.slice(1));
                     output.push(`${indent}${suffix}`);
+                }
+                continue;
+            }
+        }
+
+        // A pure-Perl region (see `registerRegion`/`flattenNode`): every returned line is symmetric -
+        // there's no delimiter to glue a first line onto, so unlike the tag-form path above, all of
+        // them (including the first) keep the full real indent `runPerltidy` produced. `%` + a space is
+        // inserted right after each line's own leading whitespace, matching the requested style
+        // (`% #` for a comment, not the Mojolicious-docs `%#` shorthand - this falls out automatically
+        // since a comment line is just ordinary Perl text as far as this is concerned).
+        if (marker?.region) {
+            const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
+            const perltidyLines = await runPerltidy(marker.region.body, {
+                configPath: perltidyContext.perltidyrcPath,
+                depth,
+                useTabs: perltidyContext.useTabs,
+                tabWidth: perltidyContext.tabWidth,
+                printWidth: perltidyContext.printWidth
+            });
+            if (perltidyLines && perltidyLines.length > 0) {
+                for (const perltidyLine of perltidyLines) {
+                    const leading = /^\s*/.exec(perltidyLine)?.[0] ?? '';
+                    output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
                 }
                 continue;
             }

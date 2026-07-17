@@ -1,0 +1,7 @@
+% # Log the error to the Mojolicious error log
+% if ( config('JSON_ERROR_LOG') ) {
+	% log->error( $c->jsonMessage( $uuid, $time ) ) if $c->can('jsonMessage');
+% }
+% else {
+	% log->error( $c->textMessage( $uuid, $time ) ) if $c->can('textMessage');
+% }

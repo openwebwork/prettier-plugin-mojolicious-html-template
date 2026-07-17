@@ -1,0 +1,8 @@
+% if ($case) {
+    % my $x = 1;
+    % if ($x) {
+        % log->error('nested');
+    % }
+% } else {
+    <p>Fallback content</p>
+% }
