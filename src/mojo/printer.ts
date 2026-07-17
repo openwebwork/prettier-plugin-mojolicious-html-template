@@ -189,7 +189,7 @@ const substituteMarkers = (line: string, markerTexts: string[]): string =>
 // level of indent it also picked up canceled back out again (see its definition above), tracked via
 // a small stack since both wrappers share the same `</ol>` closing text. Every other line is left
 // exactly as HTML formatted it, with only its marker placeholders substituted back in.
-const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], tabWidth: number): string => {
+const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], indentUnit: string): string => {
     const lines = formatted.split('\n');
     const output: string[] = [];
     const stack: ('content' | 'marker' | 'inner')[] = [];
@@ -233,7 +233,12 @@ const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], ta
         // just the innermost.
         const cancelLevels = stack.filter((entry) => entry === 'marker' || entry === 'inner').length;
         let indent = line.slice(0, line.length - line.trimStart().length);
-        indent = indent.slice(0, Math.max(0, indent.length - tabWidth * cancelLevels));
+        // One `indentUnit` per level, not `cancelLevels * indentUnit.length` characters sliced off the
+        // end - with `useTabs`, HTML indents by one literal tab character per level regardless of
+        // `tabWidth` (which only controls how wide a tab is *displayed*, not how many characters one
+        // indent level consumes), so slicing by character count would strip the wrong amount.
+        for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); i++)
+            indent = indent.slice(indentUnit.length);
         output.push(line === '' ? '' : indent + substituteMarkers(content, markerTexts));
     }
 
@@ -257,6 +262,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
             htmlDoc,
             options as unknown as Parameters<typeof doc.printer.printDocToString>[1]
         );
-        return `${stripWrappersAndSubstitute(formatted, markerTexts, options.tabWidth ?? 2)}\n`;
+        const indentUnit = options.useTabs ? '\t' : ' '.repeat(options.tabWidth ?? 2);
+        return `${stripWrappersAndSubstitute(formatted, markerTexts, indentUnit)}\n`;
     };
 };

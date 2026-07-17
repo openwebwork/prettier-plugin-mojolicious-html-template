@@ -1,0 +1,9 @@
+<div class="outer">
+	% if ($case1) {
+		<h2>Case 1 Header</h2>
+		<div class="inner">Case 1 text.</div>
+	% } else {
+		<h2>Case 2 Header</h2>
+		<div class="inner">Case 2 text.</div>
+	% }
+</div>
