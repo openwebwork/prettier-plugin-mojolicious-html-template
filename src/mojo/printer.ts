@@ -34,6 +34,25 @@ const WRAPPER_CLOSE_TAG = '</ol>';
 // by text alone, and cancels out exactly the one indent level HTML added for this wrapper's content.
 const MARKER_WRAPPER_OPEN_TAG = '<ol data-mojo-marker>';
 
+// A third wrapper, nested directly inside the content wrapper around every Block's content (not just
+// own-line markers - see `flush` below). Works around a specific quirk of `ul`/`ol`/`table`/`select`'s
+// unconditional-multiline forcing: when one of their *direct* children is an inline element glued
+// (no separating whitespace) to trailing bare text - `<i><%= $points %> Points</i>:` - prettier's HTML
+// printer splits the closing tag mid-delimiter (`</i` on one line, `>:` on the next) even when the
+// content trivially fits on one line (reproduces at any printWidth, so it isn't a fits decision). A
+// block-level real element sidesteps this (verified empirically against every existing content shape:
+// bare block tags, nested Blocks, the own-line marker wrapper) without `<ol>`'s "unconditional" quirk -
+// unlike an unrecognized/inline element (e.g. `<span>`), it also doesn't pad short collapsed content
+// with extra spaces. `<address>` specifically (rather than a common tag like `<div>`) minimizes the
+// chance of colliding with a real tag the template already uses: unlike the ol-based wrappers above,
+// which `<ol>`'s unconditional forcing guarantees always land alone on their own output line (so a
+// whole-line match is unambiguous), this one can collapse onto the same line as its content when short
+// enough to fit - so `stripWrappersAndSubstitute` has to strip its tag text out of a line rather than
+// only ever dropping whole lines, and a same-named genuine tag collapsed onto that same line would be
+// stripped right along with it.
+const CONTENT_INNER_OPEN_TAG = '<address data-mojo-inner>';
+const CONTENT_INNER_CLOSE_TAG = '</address>';
+
 interface Skeleton {
     skeleton: string;
     markerTexts: string[];
@@ -123,9 +142,9 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             let group: MojoNode[] = [];
             const flush = () => {
                 if (group.length === 0) return;
-                skeleton += WRAPPER_OPEN_TAG;
+                skeleton += WRAPPER_OPEN_TAG + CONTENT_INNER_OPEN_TAG;
                 visitSequence(group);
-                skeleton += WRAPPER_CLOSE_TAG;
+                skeleton += CONTENT_INNER_CLOSE_TAG + WRAPPER_CLOSE_TAG;
                 group = [];
             };
 
@@ -173,7 +192,7 @@ const substituteMarkers = (line: string, markerTexts: string[]): string =>
 const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], tabWidth: number): string => {
     const lines = formatted.split('\n');
     const output: string[] = [];
-    const stack: ('content' | 'marker')[] = [];
+    const stack: ('content' | 'marker' | 'inner')[] = [];
 
     const emptySeparator = WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
 
@@ -189,14 +208,33 @@ const stripWrappersAndSubstitute = (formatted: string, markerTexts: string[], ta
             stack.push('marker');
             continue;
         }
-        if (trimmed === WRAPPER_CLOSE_TAG) {
+        if (trimmed === CONTENT_INNER_OPEN_TAG) {
+            stack.push('inner');
+            continue;
+        }
+        if (trimmed === WRAPPER_CLOSE_TAG || trimmed === CONTENT_INNER_CLOSE_TAG) {
             stack.pop();
             continue;
         }
 
+        // Unlike the ol-based wrappers above (always forced onto their own line by <ol>'s
+        // unconditional-multiline behavior), <div data-mojo-inner> is an ordinary element and can
+        // collapse onto the same line as its content when that's short enough to fit - in which case
+        // it never added a separate indent level to cancel, so just strip its tag text in place
+        // rather than touching the stack.
+        let content = trimmed;
+        if (content.includes(CONTENT_INNER_OPEN_TAG) || content.includes(CONTENT_INNER_CLOSE_TAG)) {
+            content = content.split(CONTENT_INNER_OPEN_TAG).join('').split(CONTENT_INNER_CLOSE_TAG).join('');
+        }
+
+        // Each currently-open 'inner'/'marker' wrapper added one indent level HTML would otherwise
+        // keep (only 'content' levels are genuine Block nesting and should be preserved) - an own-line
+        // PlainMarker nests both at once (content -> inner -> marker), so both must be canceled, not
+        // just the innermost.
+        const cancelLevels = stack.filter((entry) => entry === 'marker' || entry === 'inner').length;
         let indent = line.slice(0, line.length - line.trimStart().length);
-        if (stack[stack.length - 1] === 'marker') indent = indent.slice(0, Math.max(0, indent.length - tabWidth));
-        output.push(line === '' ? '' : indent + substituteMarkers(trimmed, markerTexts));
+        indent = indent.slice(0, Math.max(0, indent.length - tabWidth * cancelLevels));
+        output.push(line === '' ? '' : indent + substituteMarkers(content, markerTexts));
     }
 
     return output.join('\n');
