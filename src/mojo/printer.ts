@@ -189,6 +189,17 @@ const isPureBlock = (node: MojoNode): boolean =>
 // see the "reconstruct, tidy, re-split" reasoning in CLAUDE.local.md.
 const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(node) || isPureBlock(node);
 
+// A node whose own-line placement is enforced by the whitespace-anchor mechanism in `visitSequence`
+// below, rather than by being wrapped in a real element the way an own-line `PlainMarker` is (see
+// `MARKER_WRAPPER_OPEN_TAG` above and `registerMarker`'s `ownLine` handling) - a bare `%` line, or a
+// `Block` (whose first child is always a `%`-based `OpenMarker`, registered via `registerMarker`
+// without any such wrapping - see `visitNode`). Verified empirically that a real element (`<ol>`) never
+// needs this protection even with no anchor at all - it stays correctly separated from preceding
+// sibling text on its own - but a bare, unwrapped placeholder (what a structural marker's `registerMarker`
+// call produces) does not, and merges onto the same line as preceding text given only a single newline
+// between them.
+const needsOwnLineAnchor = (node: MojoNode): boolean => node.type === 'Block' || isBarePercentLine(node);
+
 // Reconstructs the real Perl source a region's nodes represent, so the whole region can be sent to
 // `perltidy` as one ordinary program. Any marker with real content (bare `%` line, or a structural
 // Open/Mid/Close - both are just "`%` + Perl text") contributes its text with the leading `%` stripped
@@ -370,6 +381,35 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                 const isTrailingAtDocumentEnd = isTopLevel && i === nodes.length - 1;
                 if (node.text.trim() === '' && node.text.includes('\n') && !isTrailingAtDocumentEnd) {
                     skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
+                } else if (/\n[ \t]*$/.test(node.text)) {
+                    // Real text content (not just whitespace) ending in a genuine trailing newline, right
+                    // before something that needs to start its own line for correctness (see
+                    // `needsOwnLineAnchor`) - e.g. bare text "1" followed by "% if (...) {" on the next
+                    // source line, both inside a `<button>` (found against a real template,
+                    // `sort_button.html.ep`: without this, "1" and the following `%` line get merged onto
+                    // one rendered line with a single space, which breaks Mojolicious's parsing entirely -
+                    // a `%` control line must be the first non-whitespace thing on its own physical line,
+                    // so merging it after "1" turns the whole line into literal text and the following
+                    // `% } else {` / `% }` lines into unmatched closing braces, a template compile error).
+                    // Deliberately narrower than the whitespace-only case above: a *tag-form* marker
+                    // (`<%= %>` etc.) doesn't need its own line for correctness the way a `%`-line does,
+                    // and real prose ending in a newline right before one should still be free to reflow
+                    // onto the same line as before - verified a real element (`<ol>`, used for an own-line
+                    // tag-form marker) never needs this protection in the first place, unlike the bare,
+                    // unwrapped placeholder a structural marker's own `registerMarker` call produces.
+                    // The tokenizer can split "real content, then a newline" and "the following
+                    // indentation" into two *separate* adjacent `Text` nodes (found against the same real
+                    // template: "1\n" as this node, then a sibling "\t\t" node with no newline of its own,
+                    // both before the `Block`) - `nodes[i + 1]` alone would be that whitespace-only
+                    // connector, not the thing that actually needs its own line, so skip forward past any
+                    // number of purely-whitespace connectors to find the real next node first.
+                    let next = i + 1;
+                    while (next < nodes.length && nodes[next].type === 'Text' && nodes[next].text.trim() === '') {
+                        next++;
+                    }
+                    if (next < nodes.length && needsOwnLineAnchor(nodes[next])) {
+                        skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
+                    }
                 }
             } else {
                 visitNode(node);
