@@ -11,6 +11,7 @@
         "generate-grammar": "lezer-generator src/mojo/mojo.grammar -o src/mojo/mojo.grammar.js",
         "prebuild": "npm run generate-grammar",
         "build": "tsc",
+        "postbuild": "cp src/mojo/perltidy-worker.pl dist/mojo/perltidy-worker.pl",
         "watch": "tsc -w",
         "format": "prettier --write .",
         "format:check": "prettier --check .",

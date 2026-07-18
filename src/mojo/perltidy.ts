@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Walks upward from `fromDir` looking for a `.perltidyrc`, stopping at the filesystem root.
 // `perltidy`'s own discovery only checks the immediate directory (falling back to $HOME); its
@@ -26,36 +27,143 @@ export interface RunPerltidyOptions {
     printWidth: number;
 }
 
-let warnedMissingBinary = false;
+// Shelling out to the `perltidy` binary once per marker/region (the original approach) means paying a
+// fresh Perl interpreter startup plus loading the whole (large, pure-Perl) `Perl::Tidy` module on
+// *every* call - measured at ~170ms per invocation even for trivial input, which is where a file with
+// many reformattable markers spends the bulk of its formatting time (a real template took ~40s). A
+// persistent worker process - `perltidy-worker.pl`, spawned once and reused for the lifetime of this
+// Node process - calls `Perl::Tidy::perltidy()` directly instead of re-spawning a whole interpreter:
+// measured at ~2ms per call after the first (a ~100x reduction), and verified to produce byte-identical
+// output to the CLI for the same source/args, with no state leaking between calls with different
+// content/options run back-to-back. See the "perltidy worker" section of CLAUDE.local.md for the
+// protocol and the process-lifecycle details below.
+interface WorkerResponse {
+    id: number;
+    ok: boolean;
+    output: string;
+}
 
-const spawnPerltidy = (args: string[], input: string): Promise<{ code: number | null; stdout: string }> =>
-    new Promise((resolve) => {
-        const child = spawn('perltidy', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-        let stdout = '';
-        child.stdout.on('data', (chunk: Buffer) => {
-            stdout += chunk.toString('utf8');
-        });
-        // Errors on stdin (e.g. EPIPE if the child exits early) are surfaced via the child's own
-        // 'error'/'close' events below, not by letting the stream throw unhandled.
-        child.stdin.on('error', () => {
-            /* surfaced via 'error'/'close' below */
-        });
-        child.on('error', (err: NodeJS.ErrnoException) => {
-            if (err.code === 'ENOENT' && !warnedMissingBinary) {
-                warnedMissingBinary = true;
-                console.error(
-                    'prettier-plugin-mojolicious-html-template: `perltidy` was not found on PATH - ' +
-                        'embedded Perl will be left unformatted. Install perltidy to enable Perl reformatting.'
-                );
-            }
-            resolve({ code: null, stdout: '' });
-        });
-        child.on('close', (code) => {
-            resolve({ code, stdout });
-        });
-        child.stdin.write(input);
-        child.stdin.end();
+let worker: ChildProcessWithoutNullStreams | undefined;
+let workerFailed = false;
+let warnedWorkerUnavailable = false;
+let nextRequestId = 1;
+let pendingCount = 0;
+const pendingRequests = new Map<number, (result: { code: number | null; stdout: string }) => void>();
+let stdoutBuffer = '';
+
+const warnWorkerUnavailable = () => {
+    if (warnedWorkerUnavailable) return;
+    warnedWorkerUnavailable = true;
+    console.error(
+        'prettier-plugin-mojolicious-html-template: the perltidy worker (`perl` with `Perl::Tidy` installed) ' +
+            'is not available - embedded Perl will be left unformatted. Install perltidy to enable Perl reformatting.'
+    );
+};
+
+// Any failure past this point (spawn failure, unexpected exit, a malformed response) is permanent for
+// the rest of this process - not retried per call, matching the old single-warning-then-always-fall-back
+// behavior for a missing `perltidy` binary. Every request still in flight resolves to the same
+// "unavailable" result its caller already knows how to handle (`runPerltidy` returns `null`, and the
+// caller falls back to raw passthrough for that one marker/region), rather than hanging forever.
+const failWorker = () => {
+    if (workerFailed) return;
+    workerFailed = true;
+    warnWorkerUnavailable();
+    for (const resolve of pendingRequests.values()) resolve({ code: null, stdout: '' });
+    pendingRequests.clear();
+};
+
+// The worker is a long-lived child that only ever exits when killed - left at Node's default "ref'd"
+// state, an idle worker (nothing currently awaiting a response) would keep this process's event loop
+// alive forever, since an open pipe to a still-running child counts as pending work exactly the same way
+// an in-flight request does. Verified empirically: a plain `child.unref()` at spawn time isn't enough on
+// its own (the piped stdio streams are separate handles that keep the loop alive independently), and
+// unref'ing everything unconditionally races the response itself (the process can exit before a
+// still-in-flight request's answer arrives). The fix is to toggle ref/unref dynamically around the
+// *count* of in-flight requests - ref'd while `pendingCount > 0` (so the process waits for real answers),
+// unref'd the instant it drops back to zero (so the process can exit normally between requests, or after
+// the last one, without this worker holding it open) - with `process.on('exit', ...)` as a last-resort
+// cleanup so the child never outlives this process as an orphan.
+// `ChildProcess.stdin`/`stdout`/`stderr` are typed as the generic `stream.Writable`/`Readable`, which
+// don't declare `ref`/`unref` even though the actual objects behind piped stdio (`net.Socket` instances)
+// have them at runtime - a plain TypeScript typing gap, not a real distinction.
+interface Refable {
+    ref(): void;
+    unref(): void;
+}
+
+const setWorkerReferenced = (referenced: boolean) => {
+    if (!worker) return;
+    const streams: Refable[] = [
+        worker,
+        worker.stdin as unknown as Refable,
+        worker.stdout as unknown as Refable,
+        worker.stderr as unknown as Refable
+    ];
+    for (const stream of streams) {
+        if (referenced) stream.ref();
+        else stream.unref();
+    }
+};
+
+const ensureWorker = (): void => {
+    if (worker || workerFailed) return;
+
+    const workerPath = fileURLToPath(new URL('perltidy-worker.pl', import.meta.url));
+    const child = spawn('perl', [workerPath]);
+    worker = child;
+    process.on('exit', () => child.kill());
+
+    child.stdin.on('error', () => {
+        /* surfaced via 'error'/'close' below */
     });
+    child.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') failWorker();
+    });
+    child.on('close', failWorker);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+        stdoutBuffer += chunk.toString('utf8');
+        let newlineIndex = stdoutBuffer.indexOf('\n');
+        while (newlineIndex !== -1) {
+            const line = stdoutBuffer.slice(0, newlineIndex);
+            stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+            newlineIndex = stdoutBuffer.indexOf('\n');
+            if (line === '') continue;
+
+            let response: WorkerResponse;
+            try {
+                response = JSON.parse(line) as WorkerResponse;
+            } catch {
+                continue;
+            }
+            const resolve = pendingRequests.get(response.id);
+            if (!resolve) continue;
+            pendingRequests.delete(response.id);
+            resolve({ code: response.ok ? 0 : 1, stdout: response.output });
+        }
+    });
+
+    setWorkerReferenced(false);
+};
+
+const spawnPerltidy = (args: string[], input: string): Promise<{ code: number | null; stdout: string }> => {
+    ensureWorker();
+    const activeWorker = worker;
+    if (workerFailed || !activeWorker) return Promise.resolve({ code: null, stdout: '' });
+
+    const id = nextRequestId++;
+    return new Promise((resolve) => {
+        pendingRequests.set(id, (result) => {
+            pendingCount--;
+            if (pendingCount === 0) setWorkerReferenced(false);
+            resolve(result);
+        });
+        pendingCount++;
+        setWorkerReferenced(true);
+        activeWorker.stdin.write(`${JSON.stringify({ id, args, source: input })}\n`);
+    });
+};
 
 // Reformats `perlCode` with `perltidy`, using a brace-wrapping trick (see CLAUDE.local.md) so that
 // perltidy's own indentation and line-wrapping decisions account for `depth` levels of surrounding
@@ -89,12 +197,16 @@ export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): P
 
     // `-l=<printWidth>` is passed either way (even alongside a discovered `.perltidyrc`) so wrapping
     // decisions are always tied to prettier's actual resolved printWidth, not merely assumed to match
-    // whatever the profile happens to set.
+    // whatever the profile happens to set. `-nst` (explicitly, rather than just omitting `-st`) matches
+    // `Perl::Tidy`'s own documented module-usage example: source is passed directly via the `source`
+    // param inside the worker, not read from actual stdin, but a discovered profile could still set
+    // `-pbp` (which implies `-st`) or `-st` itself for its own reasons - forcing `-nst` unconditionally
+    // avoids that colliding with how the worker actually supplies its input.
     const l = printWidth.toString();
     const i = tabWidth.toString();
     const args = configPath
-        ? [`-pro=${configPath}`, `-l=${l}`, '-st', '-se']
-        : ['-npro', `-l=${l}`, `-i=${i}`, `-ci=${i}`, '-xci', '-st', '-se', useTabs ? `-et=${i}` : '-nt'];
+        ? [`-pro=${configPath}`, `-l=${l}`, '-nst', '-se']
+        : ['-npro', `-l=${l}`, `-i=${i}`, `-ci=${i}`, '-xci', '-nst', '-se', useTabs ? `-et=${i}` : '-nt'];
 
     // `perltidy`'s own output isn't always a fixed point of itself in a single pass when a `-wn`
     // welding decision sits right at a width boundary - verified empirically against a real
