@@ -314,7 +314,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // a run as ordinary reflowable prose and collapses every line onto one, so an empty wrapper is
     // spliced in to anchor the boundary - it's dropped again during substitution, contributing nothing
     // to the final output but forcing HTML to preserve the surrounding line breaks.
-    const visitSequence = (rawNodes: MojoNode[]) => {
+    const visitSequence = (rawNodes: MojoNode[], isTopLevel = false) => {
         const nodes = collapseBlankPercentRuns(rawNodes);
         let i = 0;
         while (i < nodes.length) {
@@ -358,7 +358,17 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             const node = nodes[i];
             if (node.type === 'Text') {
                 skeleton += node.text;
-                if (node.text.trim() === '' && node.text.includes('\n')) {
+                // Trailing whitespace after the very last node of the whole document needs no anchor:
+                // there's nothing further along to preserve a line break *before*, and adding one here
+                // anyway plants a real trailing element in the skeleton that prettier's HTML printer
+                // sees as genuine content needing a blank line before it - defeating its own "strip all
+                // trailing blank lines at end of file" behavior, which otherwise applies uniformly to
+                // plain HTML (found against a real report: a `%` line followed by several blank lines at
+                // EOF left exactly one blank line in the output, where plain HTML with the same trailing
+                // blank lines leaves none). Anywhere else - between two markers, or before a Block's own
+                // closing marker - the anchor is still required the same as always.
+                const isTrailingAtDocumentEnd = isTopLevel && i === nodes.length - 1;
+                if (node.text.trim() === '' && node.text.includes('\n') && !isTrailingAtDocumentEnd) {
                     skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
                 }
             } else {
@@ -401,7 +411,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         registerMarker(node);
     };
 
-    visitSequence(programNode.children);
+    visitSequence(programNode.children, true);
 
     return { skeleton, markers };
 };
