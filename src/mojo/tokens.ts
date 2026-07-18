@@ -140,15 +140,29 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
     // *previous* run had already added).
     if (input.next === PERCENT && isLineStart(input)) {
         let offset = 1;
-        while (input.peek(offset) !== NEWLINE && input.peek(offset) !== -1) offset++;
-        input.acceptToken(classify(sliceByPeek(input, 1, offset)), offset);
+        // The position of a genuine (unquoted) trailing `#` comment, if any - `classify` needs the
+        // code-only portion, since `content.trim()` still ends with the comment's text otherwise, not
+        // `{` (found against a real template: `% if (-T $file) {    # comment` was misclassified as a
+        // bare PlainMarker instead of an OpenMarker, and Lezer's error recovery then abandoned the
+        // whole enclosing Block). `skipStringOrComment` already treats a `#` inside a string or
+        // quote-like operator as opaque, so checking for a bare `HASH` right before calling it (rather
+        // than naively searching the extracted string afterward) can't be fooled by one of those.
+        let codeEnd = -1;
+        while (input.peek(offset) !== NEWLINE && input.peek(offset) !== -1) {
+            if (codeEnd === -1 && input.peek(offset) === HASH) codeEnd = offset;
+            const skipped = skipStringOrComment(input, offset);
+            offset = skipped === offset ? offset + 1 : skipped;
+        }
+        input.acceptToken(classify(sliceByPeek(input, 1, codeEnd === -1 ? offset : codeEnd)), offset);
         return;
     }
 
     // An inline `<% ... %>` tag, found in full on one lookahead scan.
     if (input.next === LT && input.peek(1) === PERCENT) {
         let offset = 2;
+        let codeEnd = -1; // see the bare `%`-line branch above for why this is needed
         while (!(input.peek(offset - 1) === PERCENT && input.peek(offset) === GT) && input.peek(offset) !== -1) {
+            if (codeEnd === -1 && input.peek(offset) === HASH) codeEnd = offset;
             const skipped = skipStringOrComment(input, offset);
             offset = skipped === offset ? offset + 1 : skipped;
         }
@@ -156,7 +170,8 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
             // The '%' right before '>' is always the delimiter; a '=' before that is the "trim
             // the following newline" modifier (`=%>`), not part of the Perl content, so strip it too.
             const contentEnd = input.peek(offset - 2) === EQUALS ? offset - 2 : offset - 1;
-            input.acceptToken(classify(sliceByPeek(input, 2, contentEnd)), offset + 1);
+            const classifyEnd = codeEnd === -1 ? contentEnd : Math.min(codeEnd, contentEnd);
+            input.acceptToken(classify(sliceByPeek(input, 2, classifyEnd)), offset + 1);
             return;
         }
         // No closing `%>` was found; fall through and treat the `<` as ordinary text.

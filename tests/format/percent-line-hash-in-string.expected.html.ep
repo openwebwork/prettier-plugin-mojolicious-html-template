@@ -1,0 +1,4 @@
+% my $x = "value#not-a-comment";
+% if ($x) {
+	<div>content</div>
+% }
