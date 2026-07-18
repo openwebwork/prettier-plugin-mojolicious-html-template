@@ -610,6 +610,16 @@ const stripWrappersAndSubstitute = async (
             if (perltidyLines && !hadTrailingSemicolon) {
                 const lastIndex = perltidyLines.length - 1;
                 perltidyLines[lastIndex] = perltidyLines[lastIndex].replace(/;\s*$/, '');
+                // A list ending in a trailing comma (`'aria-selected' => $active ? 'true' : 'false',`)
+                // leaves the synthetic `;` dangling with nothing to glue onto - `perltidy` gives it a
+                // line of its own rather than attaching it to the trailing comma (found against a real
+                // template: `ContentGenerator/Instructor/UserList.html.ep`'s `link_to` call, whose
+                // hash-arg list ends in a trailing comma). Stripping the `;` then leaves that whole line
+                // empty, which would otherwise survive into the output as a spurious blank line right
+                // before `=%>` - drop it outright rather than just stripping the semicolon off it.
+                if (perltidyLines.length > 1 && perltidyLines[lastIndex].trim() === '') {
+                    perltidyLines.pop();
+                }
             }
             // `perltidy` vertically aligns a `=>` chain (or similar) across sibling continuation lines by
             // padding with spaces before the token, using the *unprefixed* first line as part of that
