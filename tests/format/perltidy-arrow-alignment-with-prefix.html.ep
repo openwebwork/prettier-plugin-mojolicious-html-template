@@ -1,0 +1,4 @@
+<%= link_to maketext('Report bugs') => $ce->{webworkURLs}{webwork2BugReporter},
+	target => 'bug_report',
+	class => 'nav-link'
+=%>

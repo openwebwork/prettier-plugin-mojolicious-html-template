@@ -462,6 +462,19 @@ const classifyOlCloses = (formatted: string): boolean[] => {
     return closes;
 };
 
+// The visual column `line[0..endIndex)` ends at, expanding tabs to the next `tabWidth` stop the same
+// way `perltidy` itself does when deciding where to pad a vertically-aligned token (see the `=>`
+// realignment below) - a plain character count would be wrong whenever `useTabs` mixes literal tabs
+// (structural indent) with the literal spaces `perltidy` inserts for alignment padding, both of which
+// appear on the same line (e.g. `\t\t\t\ttarget                      => ...`).
+const visualColumn = (line: string, endIndex: number, useTabs: boolean, tabWidth: number): number => {
+    let col = 0;
+    for (let i = 0; i < endIndex; i++) {
+        col += useTabs && line[i] === '\t' ? tabWidth - (col % tabWidth) : 1;
+    }
+    return col;
+};
+
 const stripWrappersAndSubstitute = async (
     formatted: string,
     markers: MarkerInfo[],
@@ -587,6 +600,46 @@ const stripWrappersAndSubstitute = async (
             if (perltidyLines && !hadTrailingSemicolon) {
                 const lastIndex = perltidyLines.length - 1;
                 perltidyLines[lastIndex] = perltidyLines[lastIndex].replace(/;\s*$/, '');
+            }
+            // `perltidy` vertically aligns a `=>` chain (or similar) across sibling continuation lines by
+            // padding with spaces before the token, using the *unprefixed* first line as part of that
+            // alignment - it has no idea `prefix` (e.g. `<%=`) is about to be glued onto that first line
+            // afterward, widening it by `prefix.length + 1` columns. Left alone, every other line's `=>`
+            // stays at the old column, `prefix.length + 1` short of the first line's new one (found
+            // against a real template: `link_to maketext('Report bugs') => ...` on the glued first line,
+            // with `target => ...` / `class => ...` on their own lines 4 columns left of where they should
+            // land). Detected precisely rather than assumed: only a continuation line whose own `=>`
+            // already sits at *exactly* the same visual column as the first line's `=>` (i.e. one
+            // `perltidy` deliberately aligned with it, not an unrelated/nested one at some other column)
+            // gets `prefix.length + 1` extra spaces inserted immediately before its `=>`. This only ever
+            // touches text *after* each line's existing leading whitespace, never the leading whitespace
+            // itself, so it can't interfere with the closing-delimiter-gluing check below (which compares
+            // leading whitespace only, computed independently of this).
+            if (perltidyLines && perltidyLines.length > 1) {
+                const firstArrowIndex = perltidyLines[0].indexOf('=>');
+                if (firstArrowIndex !== -1) {
+                    const firstArrowColumn = visualColumn(
+                        perltidyLines[0],
+                        firstArrowIndex,
+                        perltidyContext.useTabs,
+                        perltidyContext.tabWidth
+                    );
+                    const pad = ' '.repeat(prefix.length + 1);
+                    for (let i = 1; i < perltidyLines.length; i++) {
+                        const arrowIndex = perltidyLines[i].indexOf('=>');
+                        if (arrowIndex === -1) continue;
+                        const arrowColumn = visualColumn(
+                            perltidyLines[i],
+                            arrowIndex,
+                            perltidyContext.useTabs,
+                            perltidyContext.tabWidth
+                        );
+                        if (arrowColumn === firstArrowColumn) {
+                            perltidyLines[i] =
+                                perltidyLines[i].slice(0, arrowIndex) + pad + perltidyLines[i].slice(arrowIndex);
+                        }
+                    }
+                }
             }
             // A percent-line (`%=`/`%==`) marker can never safely become multi-line - Mojo::Template
             // only treats a line as Perl if it starts with `%`, so a continuation line without one
