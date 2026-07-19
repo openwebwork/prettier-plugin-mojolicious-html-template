@@ -9,6 +9,7 @@ const EQUALS = 61; // '='
 const SPACE = 32; // ' '
 const TAB = 9; // '\t'
 const HASH = 35; // '#'
+const DOLLAR = 36; // '$'
 const SINGLE_QUOTE = 39; // "'"
 const DOUBLE_QUOTE = 34; // '"'
 const BACKSLASH = 92; // '\\'
@@ -75,7 +76,18 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
     if (quoteLike !== offset) return quoteLike;
 
     const c = input.peek(offset);
-    if (c === HASH) {
+    // A `#` immediately preceded by `$` isn't a comment marker - it's Perl's "last index of this
+    // array" sigil (`$#addOnConfFiles`, `$#{$arrayref}`), which can appear anywhere an ordinary
+    // scalar could, including mid-expression. Without this exclusion, `$#addOnConfFiles` gets misread
+    // as introducing a trailing comment, truncating everything from the `#` onward - on a percent-line
+    // that ends in `{` (`% for (0 .. $#addOnConfFiles){`), the `{` itself falls inside the truncated
+    // "comment" and is never seen, so `classify()` misses that this line opens a Block. That single
+    // misclassification desyncs the open/close marker count for the rest of the file, and Lezer's error
+    // recovery doesn't surface it until the parser can't reconcile the nesting anywhere later - found
+    // against a real template (`ContentGenerator/CourseAdmin/add_course_form.html.ep`) where this
+    // silently corrupted formatting for the entire file with no visible error, the misclassified line
+    // itself nowhere near where the resulting parse error actually showed up.
+    if (c === HASH && input.peek(offset - 1) !== DOLLAR) {
         let o = offset + 1;
         while (input.peek(o) !== NEWLINE && input.peek(o) !== -1) o++;
         return o;
@@ -100,6 +112,24 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
         return o + 1;
     }
     return offset;
+};
+
+// `%=`/`%==` (bare line) and `<%=`/`<%==` (tag) are the "output this expression's value" sigils -
+// zero, one, or two `=` characters immediately after the opening delimiter, no space allowed before
+// them. They're never part of the Perl content itself, so `classify` must not see them: `<%= end %>`
+// (a real, valid way to close a `begin`/`end` block, since Mojo::Template's `begin`/`end` pairing works
+// with any tag form) has code content that's genuinely just `end`, but without skipping the sigil first,
+// the extracted content would start with `= end` instead, whose trim() never starts with `end`, so
+// `/^end\b/` never matches and the CloseMarker is misclassified as a PlainMarker - the same
+// desynced-nesting-count failure mode as the other `classify` bugs above, except here the
+// misclassification is at a *closing* marker rather than an opening one (found against a real template,
+// `HTML/StudentNav/student_nav.html.ep`, whose `<%= end %>` - paired with an earlier `begin =%>` several
+// lines up - silently broke formatting for the entire rest of the file).
+const skipOutputSigil = (input: InputStream, offset: number): number => {
+    let o = offset;
+    if (input.peek(o) === EQUALS) o++;
+    if (input.peek(o) === EQUALS) o++;
+    return o;
 };
 
 // A control line/tag "opens" a block if its Perl content ends with `{` or the `begin` keyword, and
@@ -151,20 +181,24 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
     // *previous* run had already added).
     if (input.next === PERCENT && isLineStart(input)) {
         let offset = 1;
-        // The position of a genuine (unquoted) trailing `#` comment, if any - `classify` needs the
-        // code-only portion, since `content.trim()` still ends with the comment's text otherwise, not
-        // `{` (found against a real template: `% if (-T $file) {    # comment` was misclassified as a
-        // bare PlainMarker instead of an OpenMarker, and Lezer's error recovery then abandoned the
-        // whole enclosing Block). `skipStringOrComment` already treats a `#` inside a string or
-        // quote-like operator as opaque, so checking for a bare `HASH` right before calling it (rather
-        // than naively searching the extracted string afterward) can't be fooled by one of those.
+        // The position of a genuine (unquoted, non-sigil) trailing `#` comment, if any - `classify`
+        // needs the code-only portion, since `content.trim()` still ends with the comment's text
+        // otherwise, not `{` (found against a real template: `% if (-T $file) {    # comment` was
+        // misclassified as a bare PlainMarker instead of an OpenMarker, and Lezer's error recovery then
+        // abandoned the whole enclosing Block). `skipStringOrComment` already treats a `#` inside a
+        // string, quote-like operator, or `$#array` sigil as opaque, so checking for a bare `HASH` not
+        // immediately preceded by `$` right before calling it (rather than naively searching the
+        // extracted string afterward) can't be fooled by any of those - see its own comment for the
+        // `$#` case specifically.
         let codeEnd = -1;
         while (input.peek(offset) !== NEWLINE && input.peek(offset) !== -1) {
-            if (codeEnd === -1 && input.peek(offset) === HASH) codeEnd = offset;
+            if (codeEnd === -1 && input.peek(offset) === HASH && input.peek(offset - 1) !== DOLLAR) codeEnd = offset;
             const skipped = skipStringOrComment(input, offset);
             offset = skipped === offset ? offset + 1 : skipped;
         }
-        input.acceptToken(classify(sliceByPeek(input, 1, codeEnd === -1 ? offset : codeEnd)), offset);
+        const classifyEnd = codeEnd === -1 ? offset : codeEnd;
+        const contentStart = skipOutputSigil(input, 1);
+        input.acceptToken(classify(sliceByPeek(input, contentStart, classifyEnd)), offset);
         return;
     }
 
@@ -173,7 +207,7 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
         let offset = 2;
         let codeEnd = -1; // see the bare `%`-line branch above for why this is needed
         while (!(input.peek(offset - 1) === PERCENT && input.peek(offset) === GT) && input.peek(offset) !== -1) {
-            if (codeEnd === -1 && input.peek(offset) === HASH) codeEnd = offset;
+            if (codeEnd === -1 && input.peek(offset) === HASH && input.peek(offset - 1) !== DOLLAR) codeEnd = offset;
             const skipped = skipStringOrComment(input, offset);
             offset = skipped === offset ? offset + 1 : skipped;
         }
@@ -182,7 +216,8 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
             // the following newline" modifier (`=%>`), not part of the Perl content, so strip it too.
             const contentEnd = input.peek(offset - 2) === EQUALS ? offset - 2 : offset - 1;
             const classifyEnd = codeEnd === -1 ? contentEnd : Math.min(codeEnd, contentEnd);
-            input.acceptToken(classify(sliceByPeek(input, 2, classifyEnd)), offset + 1);
+            const contentStart = skipOutputSigil(input, 2);
+            input.acceptToken(classify(sliceByPeek(input, contentStart, classifyEnd)), offset + 1);
             return;
         }
         // No closing `%>` was found; fall through and treat the `<` as ordinary text.
