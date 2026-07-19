@@ -80,12 +80,23 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
         while (input.peek(o) !== NEWLINE && input.peek(o) !== -1) o++;
         return o;
     }
-    if (c === SINGLE_QUOTE || c === DOUBLE_QUOTE) {
+    // A quote immediately preceded by a backslash isn't a real string opener - it's an escaped literal
+    // quote character in surrounding code, most commonly a regex pattern (`s/\"//g`, matching a literal
+    // `"`), not the start of a new Perl string. Without this, `offset` lands on that `"` fresh (the
+    // backslash itself was just stepped over as an ordinary character on the previous scan step), gets
+    // misread as opening an unterminated string, and the search for a closing quote runs off the end of
+    // the template (found against a real one, `exception_default.html.ep`'s `s/\"//g`).
+    if ((c === SINGLE_QUOTE || c === DOUBLE_QUOTE) && input.peek(offset - 1) !== BACKSLASH) {
         let o = offset + 1;
         while (input.peek(o) !== c && input.peek(o) !== -1) {
             if (input.peek(o) === BACKSLASH) o++;
             o++;
         }
+        // Unterminated (hit end of input without finding the closing quote) - bail rather than
+        // returning an offset past the actual end of the source, which would otherwise crash the
+        // tokenizer outright (`RangeError: Token end out of bounds`) instead of just mis-tokenizing;
+        // mirrors `skipQuoteLikeOperator`'s own same-shaped guard just above.
+        if (input.peek(o) === -1) return offset;
         return o + 1;
     }
     return offset;

@@ -1,0 +1,8 @@
+<p>
+	Some text
+	% if ($x) {
+		<i>yes</i>
+	% } else {
+		<i>no</i>
+	% }
+</p>

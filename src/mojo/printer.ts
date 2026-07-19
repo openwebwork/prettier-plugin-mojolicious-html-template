@@ -13,45 +13,85 @@ const isStructuralMarker = (type: string): boolean =>
 const MARKER_OPEN = `${String.fromCharCode(0xe000)}MOJO`;
 const MARKER_CLOSE = String.fromCharCode(0xe001);
 const MARKER_PAD = String.fromCharCode(0xe002);
+// Stands in for a `\` that was glued (no whitespace at all) directly to whatever preceded it in the
+// source - see `withBackslashContinuationAnchors`'s own comment for why this needs to be distinguished
+// from an ordinary, already-isolated backslash line.
+const GLUED_BACKSLASH_SENTINEL = String.fromCharCode(0xe003);
 
-// `<ol data-mojo-wrapper>` rather than a made-up tag name: prettier's HTML printer only forces an
-// element's children onto their own indented lines unconditionally for a handful of tags
-// (list/table/select-like containers - `ul`/`ol`/`table`/`select` all qualify, tested empirically);
-// an unrecognized custom tag is treated as inline and its content collapses onto one line whenever
-// it's short enough to fit, which is wrong for Perl control-flow blocks that should always get their
-// own line regardless of width. The `data-mojo-wrapper` attribute keeps the *opening* tag unambiguous
-// from a real `<ol>` the template's own HTML might contain; the closing `</ol>` is still just plain
-// text, so a genuine `<ol>...</ol>` elsewhere in the template is a real (if unlikely) collision risk
-// with this approach that a future iteration should close off, e.g. by doing the substitution via
-// the Doc tree's own structure instead of text matching.
-const WRAPPER_OPEN_TAG = '<ol data-mojo-wrapper>';
-const WRAPPER_CLOSE_TAG = '</ol>';
+// `<ol data-mojo-wrapper>` rather than a made-up tag name: prettier's HTML printer's own source
+// (the `tr()` helper in its HTML plugin) only forces an element's children onto their own indented
+// lines unconditionally for an exact, hardcoded set of tags - `html`, `head`, `ul`, `ol`, `select`, and
+// anything whose CSS display starts with `table` (`table` itself, `caption`, `colgroup`, `thead`,
+// `tbody`, `tfoot`, `tr` - but not `td`/`th`, which are `table-cell`). An unrecognized custom tag is
+// treated as ordinary content and collapses onto one line whenever it's short enough to fit, which is
+// wrong for Perl control-flow blocks that should always get their own line regardless of width.
+//
+// `<ol>` was the original choice, but HTML5 defines a `<p>` as implicitly closed by a number of its
+// potential children - `address`/`div`/`ol`/`table`/`ul` among them - so a Mojo construct sitting
+// inside a real `<p>` (an extremely ordinary thing to write) made prettier's own HTML parser see
+// `<p>...<ol data-mojo-wrapper>...` and silently end the `<p>` right there, turning the template's own
+// later `</p>` into a genuine parse error (found against a real template, `exception_default.html.ep`:
+// this made `embed()`'s `textToDoc()` call throw, which prettier's plugin system catches and silently
+// falls back to printing the whole file's raw, unformatted source unchanged - no visible exception,
+// just a silent no-op format). `<select>` was tried next, since it isn't on that implied-end-tag list -
+// but it turned out to have its own problem, found by running the full fixture suite against it: unlike
+// `ol`/`ul`/`table` (all genuinely block-level), `select`'s *default* CSS display is `inline-block`
+// (per the same prettier source), so while it still forces its own *children* onto their own lines, it
+// doesn't force *itself* onto a line separate from a glued sibling the way a true block element does -
+// verified directly: `<div>text{<select data-x>content</select>}more</div>` formats with `<select>`
+// left glued onto `text{`, splitting its own closing tag mid-delimiter, whereas the same markup with
+// `ol`/`ul`/`table` correctly separates everything onto its own line. Since our own synthetic wrapper
+// routinely gets spliced in glued to whatever came right before it in the skeleton (a structural
+// marker's own bare, unwrapped placeholder text, for instance), this broke real content everywhere a
+// wrapper followed one of those directly. `colgroup`/`caption`/`thead`/`tbody`/`tfoot`/`tr` are the only
+// remaining candidates: genuinely block-level (so they self-separate from siblings, verified the same
+// way), not on `<p>`'s implied-end-tag list (verified), and don't get relocated even when nested inside
+// a real `<table>`/`<td>` in a position that would be structurally illegal for them there (verified -
+// prettier's HTML parser doesn't enforce table content-model/foster-parenting rules the strict way a
+// browser would, matching how it's always tolerated arbitrary content inside `<ol>`, whose own real
+// content model is `<li>`-only, without complaint). `colgroup` specifically (over `caption`/`tbody`/`tr`,
+// which are all extremely common in real tables) was chosen for the lowest collision risk with genuine
+// template content: its real-world content model is just self-closing `<col>` tags, so a template
+// author writing substantive content inside a `<colgroup>...</colgroup>` - the shape that would collide
+// with our own usage - essentially never happens (confirmed against every real webwork2 template: only
+// one uses `<colgroup>` at all, and only for its ordinary `<col>` styling purpose). The
+// `data-mojo-wrapper` attribute keeps the *opening* tag unambiguous from a real `<colgroup>` the
+// template's own HTML might contain; the closing `</colgroup>` is still just plain text, so a genuine
+// `<colgroup>...</colgroup>` elsewhere in the template is a collision risk with this approach -
+// handled below by `classifyWrapperCloses`, the same way an unrelated `<ol>` used to need handling
+// before this tag switched (twice).
+const WRAPPER_OPEN_TAG = '<colgroup data-mojo-wrapper>';
+const WRAPPER_CLOSE_TAG = '</colgroup>';
 
 // A second, distinct wrapper used only around a single own-line `PlainMarker` (see `registerMarker`)
 // - it needs the same "look like a real element so HTML preserves my own-line placement" trick as
 // the content wrapper above, but *without* the extra indent level: unlike a Block's content, which
 // really is nested one level deeper than its markers, a bare marker's own line shouldn't move at
-// all. `</ol>` is shared as the closing tag for both (closing tags never carry attributes to
+// all. `</colgroup>` is shared as the closing tag for both (closing tags never carry attributes to
 // disambiguate with), so `stripWrappersAndSubstitute` matches them up with a small stack instead of
 // by text alone, and cancels out exactly the one indent level HTML added for this wrapper's content.
-const MARKER_WRAPPER_OPEN_TAG = '<ol data-mojo-marker>';
+const MARKER_WRAPPER_OPEN_TAG = '<colgroup data-mojo-marker>';
 
 // A third wrapper, nested directly inside the content wrapper around every Block's content (not just
-// own-line markers - see `flush` below). Works around a specific quirk of `ul`/`ol`/`table`/`select`'s
+// own-line markers - see `flush` below). Works around a specific quirk of the outer wrapper's
 // unconditional-multiline forcing: when one of their *direct* children is an inline element glued
 // (no separating whitespace) to trailing bare text - `<i><%= $points %> Points</i>:` - prettier's HTML
 // printer splits the closing tag mid-delimiter (`</i` on one line, `>:` on the next) even when the
 // content trivially fits on one line (reproduces at any printWidth, so it isn't a fits decision). A
 // block-level real element sidesteps this (verified empirically against every existing content shape:
-// bare block tags, nested Blocks, the own-line marker wrapper) without `<ol>`'s "unconditional" quirk -
-// unlike an unrecognized/inline element (e.g. `<span>`), it also doesn't pad short collapsed content
-// with extra spaces. `<address>` specifically (rather than a common tag like `<div>`) minimizes the
-// chance of colliding with a real tag the template already uses: unlike the ol-based wrappers above,
-// which `<ol>`'s unconditional forcing guarantees always land alone on their own output line (so a
-// whole-line match is unambiguous), this one can collapse onto the same line as its content when short
-// enough to fit - so `stripWrappersAndSubstitute` has to strip its tag text out of a line rather than
-// only ever dropping whole lines, and a same-named genuine tag collapsed onto that same line would be
-// stripped right along with it.
+// bare block tags, nested Blocks, the own-line marker wrapper) without the outer wrapper's
+// "unconditional" quirk - unlike an unrecognized/inline element (e.g. `<span>`), it also doesn't pad
+// short collapsed content with extra spaces. `<address>` specifically (rather than a common tag like
+// `<div>`) minimizes the chance of colliding with a real tag the template already uses: unlike the
+// outer wrapper above, which the containing element's unconditional forcing guarantees always lands
+// alone on its own output line (so a whole-line match is unambiguous), this one can collapse onto the
+// same line as its content when short enough to fit - so `stripWrappersAndSubstitute` has to strip its
+// tag text out of a line rather than only ever dropping whole lines, and a same-named genuine tag
+// collapsed onto that same line would be stripped right along with it. Always nested *inside* the outer
+// wrapper (see `flush` below), never a direct child of whatever real element contains the Block, so
+// `<address>` being on `<p>`'s own implied-end-tag list (`<ol>` was too, though `<colgroup>` isn't)
+// doesn't matter here - that rule only triggers on an element's *direct* children, not arbitrarily
+// deep descendants.
 const CONTENT_INNER_OPEN_TAG = '<address data-mojo-inner>';
 const CONTENT_INNER_CLOSE_TAG = '</address>';
 
@@ -150,7 +190,8 @@ const collapseBlankPercentRuns = (nodes: MojoNode[]): MojoNode[] => {
 };
 
 // A closing HTML tag immediately followed by something that's neither whitespace nor the start of
-// another tag - the shape that triggers `<ol>`'s mid-tag-split quirk (see `CONTENT_INNER_OPEN_TAG`).
+// another tag - the shape that triggers the outer wrapper's mid-tag-split quirk (see
+// `CONTENT_INNER_OPEN_TAG`).
 const GLUED_CLOSE_TAG_RE = /<\/[a-zA-Z][\w-]*>(?=[^\s<])/;
 
 // True if a Block's content (`group` in `flush` below) contains the specific pattern
@@ -159,7 +200,7 @@ const GLUED_CLOSE_TAG_RE = /<\/[a-zA-Z][\w-]*>(?=[^\s<])/;
 // contribute their raw text verbatim, every `PlainMarker`/nested `Block` contributes a single opaque
 // non-whitespace placeholder character, since a marker glued directly to a closing tag is exactly as
 // risky as bare text would be - and tests it against `GLUED_CLOSE_TAG_RE`. Deliberately whole-group
-// rather than scoped to only direct children of the eventual `<ol>`: a nested `Block` is treated the
+// rather than scoped to only direct children of the eventual outer wrapper: a nested `Block` is treated the
 // same as a marker (opaque, assumed risky if glued) rather than trying to reason about whether the
 // quirk can propagate through one, since erring toward *keeping* the protection in an ambiguous case
 // only costs one indent level, while erring the other way reintroduces the mid-tag-split bug.
@@ -193,12 +234,84 @@ const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(no
 // below, rather than by being wrapped in a real element the way an own-line `PlainMarker` is (see
 // `MARKER_WRAPPER_OPEN_TAG` above and `registerMarker`'s `ownLine` handling) - a bare `%` line, or a
 // `Block` (whose first child is always a `%`-based `OpenMarker`, registered via `registerMarker`
-// without any such wrapping - see `visitNode`). Verified empirically that a real element (`<ol>`) never
+// without any such wrapping - see `visitNode`). Verified empirically that a real element (`<colgroup>`) never
 // needs this protection even with no anchor at all - it stays correctly separated from preceding
 // sibling text on its own - but a bare, unwrapped placeholder (what a structural marker's `registerMarker`
 // call produces) does not, and merges onto the same line as preceding text given only a single newline
 // between them.
 const needsOwnLineAnchor = (node: MojoNode): boolean => node.type === 'Block' || isBarePercentLine(node);
+
+// Mojo::Template gives literal template text a line-continuation marker: a text line ending in `\`
+// has its own trailing newline suppressed in the *rendered output*, joining directly with whatever
+// comes next with no newline and no substitute whitespace in its place - used to avoid stray blank
+// lines/whitespace showing up around a control-only tag that produces no visible output of its own
+// (`<% if (...) { =%>\`/`<% } =%>\`, immediately above and below the real content, in a real template).
+// This is a purely-output-time behavior tied to the *source* actually being split across two physical
+// lines there - but a `\` followed by a newline, sitting in the middle of an ordinary `Text` node's
+// content, means nothing to HTML at all (just an ordinary character followed by ordinary whitespace),
+// so left alone, prettier's HTML reflow treats it exactly like plain reflowable prose and can join it
+// onto the same line as whatever comes right before or after it, replacing that newline with a single
+// space (found against a real template, `exception_default.html.ep`: `<% } =%>\` followed by a new
+// physical line of text came out as `<% } =%>\ , including...` all on one line). That's not merely
+// cosmetic: once the `\` is no longer the last character of its own physical line, there is no longer
+// a newline there for Mojo::Template's line-continuation rule to suppress in the first place, so the
+// rendered output's whitespace at that point silently changes too. Splices the same empty-separator
+// anchor already used elsewhere in this file in immediately after every `\<newline>` found anywhere
+// within a `Text` node's own content (not just at its very end - a single node can contain more than
+// one physical line, and each one needs this independently), forcing everything after it onto its own
+// line the same way `WRAPPER_OPEN_TAG`/`WRAPPER_CLOSE_TAG` already do for marker/Block boundaries.
+//
+// That anchor alone isn't enough when the `\` is itself glued (no whitespace at all) directly to
+// whatever *precedes* it, though - a real HTML tag boundary right before it (a multi-line-wrapped
+// tag's own closing `>`, or a plain closing tag like `</div>`) gets separated from the `\` onto its own
+// line by prettier's HTML printer regardless of the `\` itself, the same structural
+// forcing/attribute-wrapping logic that puts those tags on their own line in ordinary HTML with no
+// Mojo involved at all (verified directly: `<div>\n\tcontent\n</div>\` - a plain closing tag glued to a
+// trailing `\` with zero Mojo markers anywhere - already separates them). Two genuinely different
+// source shapes produce a lone `\`-only line in the *formatted* output, though, and they don't mean the
+// same thing: one where the `\` was glued to preceding content (no newline at all belongs between them
+// - splitting it here manufactures a newline in the rendered output that was never there originally),
+// and one where the author deliberately wrote `\` as its own, already-isolated physical line (a real
+// newline *does* belong between whatever precedes it and whatever follows - collapsing that would
+// delete a newline the author actually wanted). Only the first case is a bug to fix; merging the second
+// back onto the previous line would introduce the exact same class of "changes the actual rendered
+// output" bug this whole mechanism exists to prevent. `GLUED_BACKSLASH_SENTINEL` stands in for the `\`
+// specifically when it's glued (checked via the character immediately preceding the match, `\s` versus
+// not, using a replacer *function* rather than a static string so that check has access to it) - an
+// ordinary, un-special PUA character that travels safely through prettier's reflow either way (nothing
+// to HTML), letting `stripWrappersAndSubstitute` later tell the two shapes apart: a lone *sentinel*
+// line unambiguously means "this was glued and needs re-merging onto the previous line", while a lone
+// literal `\` line (never touched here, since it wasn't glued in the source) is left as the deliberate,
+// isolated line it always was.
+const BACKSLASH_NEWLINE_RE = /\\\n/g;
+const withBackslashContinuationAnchors = (text: string): string =>
+    text.replace(BACKSLASH_NEWLINE_RE, (match, offset: number) => {
+        const precedingChar = offset > 0 ? text[offset - 1] : undefined;
+        const isGlued = precedingChar !== undefined && !/\s/.test(precedingChar);
+        const backslashText = isGlued ? GLUED_BACKSLASH_SENTINEL : '\\';
+        return `${backslashText}\n${WRAPPER_OPEN_TAG}${WRAPPER_CLOSE_TAG}`;
+    });
+
+// Whether `skeletonSoFar` (the skeleton built up to just before the point being checked) currently has
+// an unclosed `<pre>` - a plain open/close count, not a real parser, but adequate here the same way
+// `classifyWrapperCloses` elsewhere in this file also settles for a count-based approach rather than a
+// full HTML parse: a `<pre>` genuinely nested inside another `<pre>` isn't valid HTML in the first
+// place. Needed because `withBackslashContinuationAnchors`'s anchor is actively harmful inside `<pre>`:
+// unlike ordinary content, `<pre>`'s whitespace is significant, so prettier's HTML printer doesn't
+// reformat/reindent it at all - an anchor spliced in there never lands on its own line the way it does
+// everywhere else, and its literal tag text leaks straight into the rendered output instead of being
+// stripped (found immediately after landing the backslash-continuation fix above, against the exact
+// `<pre>` this project already knows has a separate, unrelated indentation bug: `<pre><% =%>\` followed
+// by more marker/text content). The anchor turns out to be unnecessary inside `<pre>` anyway - verified
+// directly that a bare `\<newline>` with no anchor at all survives untouched there, since whitespace
+// significance already does the job the anchor exists to do everywhere else.
+const PRE_OPEN_TAG_RE = /<pre(?:\s[^<>]*)?>/g;
+const PRE_CLOSE_TAG_RE = /<\/pre>/g;
+const isInsidePre = (skeletonSoFar: string): boolean => {
+    const opens = skeletonSoFar.match(PRE_OPEN_TAG_RE)?.length ?? 0;
+    const closes = skeletonSoFar.match(PRE_CLOSE_TAG_RE)?.length ?? 0;
+    return opens > closes;
+};
 
 // Reconstructs the real Perl source a region's nodes represent, so the whole region can be sent to
 // `perltidy` as one ordinary program. Any marker with real content (bare `%` line, or a structural
@@ -368,7 +481,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
 
             const node = nodes[i];
             if (node.type === 'Text') {
-                skeleton += node.text;
+                skeleton += isInsidePre(skeleton) ? node.text : withBackslashContinuationAnchors(node.text);
                 // Trailing whitespace after the very last node of the whole document needs no anchor:
                 // there's nothing further along to preserve a line break *before*, and adding one here
                 // anyway plants a real trailing element in the skeleton that prettier's HTML printer
@@ -394,7 +507,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                     // Deliberately narrower than the whitespace-only case above: a *tag-form* marker
                     // (`<%= %>` etc.) doesn't need its own line for correctness the way a `%`-line does,
                     // and real prose ending in a newline right before one should still be free to reflow
-                    // onto the same line as before - verified a real element (`<ol>`, used for an own-line
+                    // onto the same line as before - verified a real element (`<colgroup>`, used for an own-line
                     // tag-form marker) never needs this protection in the first place, unlike the bare,
                     // unwrapped placeholder a structural marker's own `registerMarker` call produces.
                     // The tokenizer can split "real content, then a newline" and "the following
@@ -476,12 +589,12 @@ const SOLE_MARKER_RE = new RegExp(`^${MARKER_OPEN}(\\d+)${MARKER_PAD}*${MARKER_C
 
 // Walks the fully-formatted HTML skeleton line by line: a line that (once trimmed) is exactly one of
 // the wrapper tags is pure scaffolding and is dropped outright. For the content wrapper, no manual
-// depth bookkeeping is needed to get its content indented one level deeper, since `<ol>` is a real
-// HTML element and prettier's own HTML formatter already indents an element's children relative to
-// it (and does so again for each further level of *nested* blocks, since each is its own nested
-// `<ol>`), exactly like it would for any other element - but the *marker* wrapper needs that one
+// depth bookkeeping is needed to get its content indented one level deeper, since `<colgroup>` is a
+// real HTML element and prettier's own HTML formatter already indents an element's children relative
+// to it (and does so again for each further level of *nested* blocks, since each is its own nested
+// wrapper), exactly like it would for any other element - but the *marker* wrapper needs that one
 // level of indent it also picked up canceled back out again (see its definition above), tracked via
-// a small stack since both wrappers share the same `</ol>` closing text. Every other line is left
+// a small stack since both wrappers share the same `</colgroup>` closing text. Every other line is left
 // exactly as HTML formatted it, with only its marker placeholders substituted back in.
 interface PerltidyContext {
     perltidyrcPath: string | undefined;
@@ -490,22 +603,24 @@ interface PerltidyContext {
     printWidth: number;
 }
 
-// A closing `</ol>` is textually indistinguishable from our own wrapper's closing tag - closing tags
-// can't carry a disambiguating attribute the way `WRAPPER_OPEN_TAG`/`MARKER_WRAPPER_OPEN_TAG` do on the
-// opening side - so a genuine `<ol>` the template's own HTML happens to contain (found in a real
-// template: `<ol class="list-group ...">`) previously had its closing tag silently dropped, since every
-// `</ol>` was unconditionally treated as ours. Fixed by a whole-document, order-preserving scan *before*
-// the line-by-line walk below: `<ol>` unconditionally forces its children onto their own line regardless
-// of who authored it (verified empirically, including nested inside our own wrapper), so every `<ol>`'s
-// own open/close tags land on dedicated lines just like ours do, making a simple stack-based pairing scan
-// reliable - `[^<>]*` (not `.`) so it still matches an opening tag whose attributes happen to wrap across
-// multiple lines. Returns, in the order `</ol>` occurrences appear in `formatted`, whether each one
-// closes one of our own wrapper opens (`true`) or a real one from the template (`false`).
-const OL_TAG_RE = /<ol(?:\s[^<>]*)?>|<\/ol>/g;
-const classifyOlCloses = (formatted: string): boolean[] => {
+// A closing `</colgroup>` is textually indistinguishable from our own wrapper's closing tag - closing
+// tags can't carry a disambiguating attribute the way `WRAPPER_OPEN_TAG`/`MARKER_WRAPPER_OPEN_TAG` do
+// on the opening side - so a genuine `<colgroup>` the template's own HTML happens to contain (one real
+// webwork2 template has one, for its ordinary `<col>`-styling purpose) would otherwise have its closing
+// tag silently dropped, the same bug a genuine `<ol>` used to trigger before this wrapper switched tags
+// (found in a real template: `<ol class="list-group ...">`). Fixed by a whole-document, order-preserving
+// scan *before* the line-by-line walk below: `<colgroup>` unconditionally forces its children onto their
+// own line regardless of who authored it (verified empirically, including nested inside our own
+// wrapper), so every `<colgroup>`'s own open/close tags land on dedicated lines just like ours do,
+// making a simple stack-based pairing scan reliable - `[^<>]*` (not `.`) so it still matches an opening
+// tag whose attributes happen to wrap across multiple lines. Returns, in the order `</colgroup>`
+// occurrences appear in `formatted`, whether each one closes one of our own wrapper opens (`true`) or a
+// real one from the template (`false`).
+const WRAPPER_TAG_RE = /<colgroup(?:\s[^<>]*)?>|<\/colgroup>/g;
+const classifyWrapperCloses = (formatted: string): boolean[] => {
     const closes: boolean[] = [];
     const stack: boolean[] = [];
-    for (const match of formatted.matchAll(OL_TAG_RE)) {
+    for (const match of formatted.matchAll(WRAPPER_TAG_RE)) {
         if (match[0] === WRAPPER_CLOSE_TAG) closes.push(stack.pop() ?? false);
         else stack.push(match[0] === WRAPPER_OPEN_TAG || match[0] === MARKER_WRAPPER_OPEN_TAG);
     }
@@ -534,19 +649,93 @@ const stripWrappersAndSubstitute = async (
     const lines = formatted.split('\n');
     const output: string[] = [];
     const stack: ('content' | 'marker' | 'inner')[] = [];
-    const olCloseIsOurs = classifyOlCloses(formatted);
-    let olCloseIndex = 0;
+    const wrapperCloseIsOurs = classifyWrapperCloses(formatted);
+    let wrapperCloseIndex = 0;
 
     const emptySeparator = WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
+
+    // `<pre>`'s content is whitespace-significant, so prettier's HTML printer never reformats it at
+    // all - verified directly against plain HTML with no Mojo involved: a `<pre>` nested three levels
+    // deep gets its own *opening* tag correctly repositioned to match that depth, but its content and
+    // closing tag stay at whatever indentation was already in the source, completely untouched. Every
+    // other line in this walk assumes the opposite - that prettier *did* uniformly shift its indentation
+    // by however many wrapper levels are currently open, so `cancelLevels` below undoes exactly that
+    // shift - which is wrong for anything inside a `<pre>`, since there was never any shift to undo
+    // there in the first place (found against the real construct this project already knows has issues,
+    // `exception_default.html.ep`'s `<pre>...<code>...</code>...</pre>`: subtracting cancelLevels from
+    // its content/closing-tag lines was quietly stripping real indentation that prettier never added).
+    // Tracked with a plain boolean rather than folding into `stack` above: unlike the wrapper tags,
+    // entering/leaving this mode isn't about a dedicated marker line of our own, but about literal
+    // `<pre>`/`</pre>` tags that can appear anywhere in the *middle* of an otherwise-ordinary content
+    // line (mixed with real text on the same line, as they are in the real construct above).
+    let insidePreContent = false;
+    const PRE_OPEN_LINE_RE = /<pre(?:\s[^<>]*)?>/;
 
     for (const line of lines) {
         const trimmed = line.trim();
 
+        if (trimmed === GLUED_BACKSLASH_SENTINEL) {
+            // The `\` this stands in for was glued (no whitespace at all) directly to whatever preceded
+            // it in the source - unlike a genuinely isolated backslash line, prettier separating it onto
+            // its own line here doesn't correspond to any real newline that belongs in the rendered
+            // output, so restore the original adjacency by gluing a literal `\` onto the end of whatever
+            // line was emitted right before this one, rather than ever emitting a line of its own for it.
+            if (output.length > 0) output[output.length - 1] += '\\';
+            continue;
+        }
+
+        if (trimmed === `>${GLUED_BACKSLASH_SENTINEL}`) {
+            // A glued backslash sitting as the very first content of a whitespace-sensitive inline
+            // element (e.g. `<span class="...">\`, the backslash glued directly to that opening tag's
+            // own `>`) forces prettier into a different, but equally deliberate, presentation: instead
+            // of separating on the newline *after* the backslash (handled above), it moves the tag's own
+            // `>` down onto its own line, directly glued to whatever comes next, to preserve "there was
+            // no whitespace here" while still letting the forced-multiline content (our marker wrapper)
+            // start on the following line - verified this is completely general, unrelated to Mojo:
+            // plain `<span>zzz<address></address>content</span>` with zero Mojo involvement exhibits the
+            // identical `<span\n\t>zzz` split. Semantically harmless (same zero-whitespace adjacency
+            // either way) but needlessly ugly when the tag's attributes would easily have fit on one line
+            // together with `>` - found against a real template,
+            // `ContentGenerator/Instructor/Index.html.ep`'s `<span class="input-group-text flex-grow-1">\`,
+            // whose short attribute list clearly didn't need `>` isolated onto its own line beneath it.
+            // Since prettier's own choice here is purely presentational, glue `>` (and the backslash it's
+            // paired with) back onto the end of whatever attribute line was emitted right before it,
+            // provided that still fits within `printWidth` - if the attributes already needed to wrap for
+            // genuine width reasons (as in a real multi-attribute `<button>` in the same file), leave `>`
+            // on its own line rather than pushing that line over budget just for cosmetics. Verified this
+            // doesn't fight prettier on a second pass: unlike asking *plain* prettier to reformat this
+            // merged text (which would just re-split it, since it's making the same leading-space-sensitive
+            // decision fresh each time), this plugin's own pipeline reconstructs the identical skeleton
+            // from the merged source and re-applies this same merge deterministically, so the merged form
+            // is a stable fixed point for *this plugin* even though it isn't one for prettier's HTML
+            // printer in isolation.
+            if (output.length > 0) {
+                const candidate = `${output[output.length - 1]}>\\`;
+                const fits =
+                    visualColumn(candidate, candidate.length, perltidyContext.useTabs, perltidyContext.tabWidth) <=
+                    perltidyContext.printWidth;
+                if (fits) {
+                    output[output.length - 1] = candidate;
+                    continue;
+                }
+            }
+            // Doesn't fit (or there's no previous line to merge onto) - fall through to the normal
+            // content path below, which already knows how to substitute an in-line sentinel back to a
+            // literal `\` without merging it anywhere.
+        }
+
+        if (insidePreContent) {
+            if (trimmed.includes('</pre>')) insidePreContent = false;
+            output.push(line === '' ? '' : substituteMarkers(line, markers));
+            continue;
+        }
+
         if (trimmed === emptySeparator) {
-            // This line's own `</ol>` is ours by construction (its `<ol data-mojo-wrapper>` half is
-            // unambiguous), but it still counts as one of the `</ol>` occurrences `classifyOlCloses`
-            // found - consume its slot so `olCloseIndex` stays aligned with subsequent ones.
-            olCloseIndex++;
+            // This line's own `</colgroup>` is ours by construction (its `<ol data-mojo-wrapper>`
+            // half is unambiguous), but it still counts as one of the `</colgroup>` occurrences
+            // `classifyWrapperCloses` found - consume its slot so `wrapperCloseIndex` stays aligned
+            // with subsequent ones.
+            wrapperCloseIndex++;
             continue; // empty content-wrapper separator, collapsed onto one line
         }
         if (trimmed === WRAPPER_OPEN_TAG) {
@@ -564,27 +753,33 @@ const stripWrappersAndSubstitute = async (
         if (trimmed === WRAPPER_CLOSE_TAG) {
             // Default to "not ours" (keep the line) on an unexpected index mismatch - silently keeping
             // an extra line is far less harmful than silently dropping a genuine closing tag.
-            const isOurs = olCloseIsOurs[olCloseIndex++] ?? false;
+            const isOurs = wrapperCloseIsOurs[wrapperCloseIndex++] ?? false;
             if (isOurs) {
                 stack.pop();
                 continue;
             }
-            // A genuine `</ol>` the template's own HTML contains - fall through to the normal line
+            // A genuine `</colgroup>` the template's own HTML contains - fall through to the normal line
             // handling below so it's kept (with indent/marker substitution applied like any other
-            // line), not dropped the way every `</ol>` used to be treated unconditionally.
+            // line), not dropped the way every `</colgroup>` used to be treated unconditionally.
         } else if (trimmed === CONTENT_INNER_CLOSE_TAG) {
             stack.pop();
             continue;
         }
 
-        // Unlike the ol-based wrappers above (always forced onto their own line by <ol>'s
-        // unconditional-multiline behavior), <div data-mojo-inner> is an ordinary element and can
+        // Unlike the wrappers above (always forced onto their own line by the outer element's
+        // unconditional-multiline behavior), <address data-mojo-inner> is an ordinary element and can
         // collapse onto the same line as its content when that's short enough to fit - in which case
         // it never added a separate indent level to cancel, so just strip its tag text in place
         // rather than touching the stack.
         let content = trimmed;
         if (content.includes(CONTENT_INNER_OPEN_TAG) || content.includes(CONTENT_INNER_CLOSE_TAG)) {
             content = content.split(CONTENT_INNER_OPEN_TAG).join('').split(CONTENT_INNER_CLOSE_TAG).join('');
+        }
+        // A glued backslash whose line *wasn't* separated from the rest of this content by prettier
+        // (short enough to still fit glued onto its original line) never hits the lone-sentinel branch
+        // above - restore the literal `\` in place here instead.
+        if (content.includes(GLUED_BACKSLASH_SENTINEL)) {
+            content = content.split(GLUED_BACKSLASH_SENTINEL).join('\\');
         }
 
         // Each currently-open 'inner'/'marker' wrapper added one indent level HTML would otherwise
@@ -782,6 +977,13 @@ const stripWrappersAndSubstitute = async (
                 continue;
             }
         }
+
+        // A `<pre ...>` opening tag on this line, not also closed again on the same line, means every
+        // subsequent line up to (and including) the matching `</pre>` is verbatim content - see the
+        // `insidePreContent` block above. This line itself still gets the normal indent/cancelLevels
+        // treatment: prettier *did* properly reposition the opening tag's own line to its real
+        // structural depth, unlike everything nested inside it.
+        if (PRE_OPEN_LINE_RE.test(content) && !content.includes('</pre>')) insidePreContent = true;
 
         output.push(line === '' ? '' : indent + substituteMarkers(content, markers));
     }

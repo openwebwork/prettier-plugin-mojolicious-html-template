@@ -1,0 +1,9 @@
+<ul>
+	% if (defined $x) {
+		<li>
+			<pre style="display:inline"><% =%>\
+				<code><%= $x->[0] %>: <%= $x->[1] %></code><% =%>\
+			</pre>
+		</li>
+	% }
+</ul>
