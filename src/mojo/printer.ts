@@ -285,7 +285,14 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // tag, not a content-flow sibling, so the own-line `<colgroup>` wrapper below doesn't apply.
         const ownLine = isOwnLine(node) && !isInsideOpenTagAttrs(skeleton);
         const insidePre = isInsidePre(skeleton);
-        const reformat = node.type === 'PlainMarker' ? splitMarkerDelimiters(node.text) : undefined;
+        // `splitMarkerDelimiters` already returns `undefined` for a bare `%` control line - including a
+        // structural one (`% if (...) {`, `% }`) - since only a tag-form or `%=`/`%==` shape is a
+        // self-contained expression safe to hand to `perltidy` on its own; a bare structural marker
+        // needs pairing with its match to be valid Perl, so it stays on the `region` path instead (see
+        // `registerRegion`). A *tag-form* structural marker (`<%= ..., begin =%>`, `<% end =%>`) is just
+        // as self-contained as any other tag-form marker, so it's eligible the same way - no need to
+        // gate on `node.type` here at all.
+        const reformat = splitMarkerDelimiters(node.text);
         markers[id] = { text: node.text, insidePre, ownLine, reformat };
         const placeholder = makePlaceholder(id);
 

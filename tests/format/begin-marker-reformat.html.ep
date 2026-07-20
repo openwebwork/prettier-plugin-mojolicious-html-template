@@ -1,0 +1,3 @@
+<%= form_for current_route, method =>     'POST', enctype    => 'multipart/form-data', begin =%>
+	<p>Content</p>
+<% end =%>
