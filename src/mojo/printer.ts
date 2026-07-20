@@ -21,10 +21,9 @@ const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 
 // `<colgroup data-mojo-wrapper>`: prettier's HTML printer only forces an element's children onto their
 // own lines unconditionally for a hardcoded set of real tags - a made-up tag would just collapse when
-// short, which is wrong for Perl control-flow blocks. `<ol>` and `<select>` were tried first but each
-// broke real content in different ways; `<colgroup>` avoids both and collides least with genuine
-// template markup. The closing `</colgroup>` is still plain text, so a real `<colgroup>` elsewhere in
-// the template is a collision handled below by `classifyWrapperCloses`.
+// short, which is wrong for Perl control-flow blocks. `<colgroup>` collides least with genuine template
+// markup; its closing `</colgroup>` is still plain text, so a real one elsewhere is a collision handled
+// below by `classifyWrapperCloses`.
 const WRAPPER_OPEN_TAG = '<colgroup data-mojo-wrapper>';
 const WRAPPER_CLOSE_TAG = '</colgroup>';
 
@@ -38,18 +37,12 @@ const MARKER_WRAPPER_OPEN_TAG = '<colgroup data-mojo-marker>';
 const CONTENT_INNER_OPEN_TAG = '<address data-mojo-inner>';
 const CONTENT_INNER_CLOSE_TAG = '</address>';
 
-// A `PlainMarker` with real Perl content gets `reformat` populated so its placeholder is spliced out
-// for real, `perltidy`-formatted content before printing (see `buildMarkerDoc`/`embed`) - own-line or
-// inline, inside `<pre>` or not. Structural markers (Open/Mid/Close) are excluded: each is a fragment
-// of a larger `{`/`}`/`begin`/`end` chain, never safe to reformat as an isolated unit. `insidePre`
-// records whether the marker sits inside `<pre>` in the source, since a `<pre>`-interior marker's real
-// content must be spliced in without adding any ambient indentation - `<pre>`'s own boundaries must not
-// gain or lose so much as one character of surrounding whitespace, even though whitespace *inside* the
-// marker's own delimiters never affects what's actually rendered. `ownLine` records whether the marker
-// sat alone on its own source line - see `buildReformattedDoc`'s single-line case for why it matters
-// there specifically (an own-line marker is always wrapped in `MARKER_WRAPPER_OPEN_TAG`, whose own
-// scaffolding text sits immediately after it in the skeleton and would otherwise count against a
-// width-fallback fits-check meant only for markers with *real* neighboring content).
+// A `PlainMarker` with real Perl content gets `reformat` populated so its placeholder is spliced out for
+// real, `perltidy`-formatted content (see `buildMarkerDoc`/`embed`). Structural markers (Open/Mid/Close)
+// are excluded: each is a fragment of a larger `{`/`}`/`begin`/`end` chain, never safe to reformat in
+// isolation. `insidePre` marks a marker inside `<pre>`, whose boundaries must not gain or lose so much
+// as one character of surrounding whitespace. `ownLine` marks a marker that sat alone on its own source
+// line - see `buildReformattedDoc`'s single-line case for why it matters.
 interface MarkerInfo {
     text: string;
     insidePre: boolean;
@@ -174,11 +167,10 @@ const isInsidePre = (skeletonSoFar: string): boolean => {
     return opens > closes;
 };
 
-// Whether `skeletonSoFar` currently sits inside a real HTML tag's still-open angle brackets (a `<name`
-// with no closing `>` yet) - found by scanning backward for the nearest real `<` or `>`, not a real
-// parser. A marker positioned here (e.g. splicing extra attributes via `<%== get_attrs(...) %>` into a
-// `<div ...>`) can't use the own-line `<colgroup>` wrapper: nesting an element inside another tag's own
-// attribute list is invalid HTML and crashes prettier's HTML parser on this skeleton.
+// Whether `skeletonSoFar` sits inside a real HTML tag's still-open angle brackets (plain backward scan
+// for the nearest real `<` or `>`, not a real parser). A marker here (e.g. splicing extra attributes via
+// `<%== get_attrs(...) %>` into a `<div ...>`) can't use the own-line `<colgroup>` wrapper - nesting an
+// element inside another tag's attribute list is invalid HTML and crashes prettier's HTML parser.
 const isInsideOpenTagAttrs = (skeletonSoFar: string): boolean => {
     for (let i = skeletonSoFar.length - 1; i >= 0; i--) {
         const c = skeletonSoFar[i];
@@ -188,15 +180,11 @@ const isInsideOpenTagAttrs = (skeletonSoFar: string): boolean => {
     return false;
 };
 
-// prettier's HTML printer unconditionally inserts a newline right after a `<pre ...>` tag's own `>`
-// whenever its content spans multiple lines and doesn't already start with one - harmless for rendering,
-// but it changes the template's own source structure that `insidePreContent` tracking (in
-// `stripWrappersAndSubstitute`) assumes is untouched. `PRE_GLUE_SENTINEL` marks where the insertion will
-// land, so that tracking can merge the split line back onto the `<pre ...>` line, undoing it. Inserted
-// whenever real content (of any kind, including a marker placeholder that may or may not turn out to be
-// multi-line once substituted) directly follows without an intervening newline - deliberately
-// unconditional rather than trying to predict whether that content will end up multi-line, since the
-// resolution side already handles "turned out not to be needed" by just deleting the sentinel in place.
+// prettier's HTML printer inserts a newline right after a `<pre ...>` tag's own `>` whenever its content
+// spans multiple lines and doesn't already start with one - harmless for rendering, but it changes the
+// source structure `insidePreContent` tracking assumes is untouched. `PRE_GLUE_SENTINEL` marks where
+// that insertion lands so the split line can be merged back. Inserted unconditionally (not just when the
+// content turns out multi-line) since an unneeded sentinel is simply deleted in place on resolution.
 const insertPreGlueSentinel = (text: string): { text: string; deferredToNextNode: boolean } => {
     let deferredToNextNode = false;
     const withSentinel = text.replace(PRE_OPEN_TAG_RE, (match: string, offset: number) => {
@@ -223,10 +211,8 @@ const flattenNode = (node: MojoNode): string => {
 };
 
 // A marker's placeholder token - no padding needed: its real content is spliced into the Doc tree
-// before prettier's own fits/break decisions run (see `embed`), so prettier sees the marker's true
-// shape directly and the placeholder's own length in the skeleton never influences the final layout,
-// in either pass (Pass 1 splices each reformat-eligible marker's own raw text for this same reason -
-// see `buildPass1MarkerDoc`).
+// before prettier's own fits/break decisions run (see `embed`), so its length in the skeleton never
+// influences the final layout, in either pass (see `buildPass1MarkerDoc` for Pass 1's own reason).
 const makePlaceholder = (id: number): string => `${MARKER_OPEN}${id.toString()}${MARKER_CLOSE}`;
 
 interface Skeleton {
@@ -312,15 +298,12 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             return;
         }
 
-        // An inline marker that isn't own-line is plain reflowable text, so a long sentence can wrap
-        // right before/after it purely for width - and re-parsing that output is then indistinguishable
-        // from the marker having been written alone on its own line, breaking idempotency (`isOwnLine`
-        // flips, the marker gets re-wrapped, indentation shifts). Fixed by replacing the whitespace on
-        // whichever side has real content with `NO_BREAK_SENTINEL`, a non-whitespace PUA character
-        // reflow can't break at, restored to a literal space afterward. Only applied to a side whose
-        // opposite side isn't already zero-gap (redundant gluing there corrupts attribute lists or blocks
-        // a legitimate line break instead) and never inside `<pre>`, whose content bypasses this
-        // substitution entirely.
+        // An inline marker is plain reflowable text, so a long sentence can wrap right before/after it
+        // purely for width - and re-parsing that output is then indistinguishable from own-line, breaking
+        // idempotency. Fixed by replacing the whitespace on whichever side has real content with
+        // `NO_BREAK_SENTINEL` (a PUA character reflow can't break at), restored to a literal space
+        // afterward. Skipped on a side whose opposite is already zero-gap (redundant gluing there
+        // corrupts attribute lists) and never inside `<pre>`.
         if (node.type === 'PlainMarker' && !insidePre) {
             if (precededByRealContent(node) && !followedByZeroGapRealContent(node) && /[ \t]$/.test(skeleton)) {
                 skeleton = skeleton.slice(0, -1) + NO_BREAK_SENTINEL;
@@ -573,16 +556,11 @@ const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line:
     }
 };
 
-// Pass 1 (see `embed`) is a throwaway HTML layout - with each reformat-eligible marker's own raw text
-// already spliced in via `buildPass1MarkerDoc`, for the same structural-accuracy reason `buildMarkerDoc`
-// splices real Doc content in the final pass - used only to learn, for every such marker, the structural
-// depth it lands on. `perltidy`'s own width-aware wrapping decisions need this, and it genuinely can't
-// be known before some HTML-aware layout pass has run: our own Lezer AST doesn't track real HTML tag
-// nesting depth at all (HTML is opaque `Text` to the tokenizer). This is still an approximation, not a
-// guarantee - a marker's raw, untidied source isn't always the same shape `perltidy` will eventually
-// produce - but Pass 2's own real Doc splicing guarantees the final output's structural correctness
-// regardless of any remaining inaccuracy here, so what's left is a narrower, accepted risk: an
-// occasionally slightly-off width budget for `perltidy`, not a structural bug or an idempotency break.
+// Learns each reformat-eligible marker's structural depth from Pass 1's throwaway layout - needed
+// because `perltidy`'s width-aware wrapping needs a depth, and our Lezer AST can't supply one (HTML is
+// opaque `Text` to the tokenizer). An approximation, not a guarantee - Pass 2's real Doc splicing
+// guarantees final structural correctness regardless, so the only risk here is an occasionally
+// slightly-off `perltidy` width budget.
 const extractMarkerDepths = (formatted: string, markers: MarkerInfo[], indentUnit: string): Map<number, number> => {
     const depths = new Map<number, number>();
     walkWrapperDepths(formatted, indentUnit, (line, depth) => {
@@ -602,48 +580,33 @@ const stripDepthPrefix = (line: string, indentUnit: string, depth: number): stri
     return result;
 };
 
-// Joins `lines` into a Doc - never a plain multi-line string: `printDocToString` doesn't correctly
-// track column position across an embedded literal `\n` inside a string leaf (newlines don't reset its
-// running `position`), which would silently corrupt fits/width decisions for everything printed after
-// it. `useAmbientIndent` selects which real line-break primitive carries that: `hardline` (ambient
-// indentation, from wherever this Doc ends up nested in the surrounding tree, supplies each line's base
-// depth automatically) when `lines` has already had that base depth stripped off; `literalline` (adds no
-// indentation of its own) when `lines` already carries its own full, absolute indentation and nothing
-// should be added on top - raw passthrough text exactly as the template's author wrote it, and
-// `perltidy`'s own *unstripped* output for a marker inside `<pre>`, where `<pre>`'s own boundaries must
-// not gain or lose so much as one character of surrounding whitespace and there's no ambient-position
-// mechanism to lean on anyway. Either primitive's real `breakParent` still forces every enclosing HTML
-// element to expand rather than collapse onto one line - the mechanism the old placeholder-padding
-// approach could only ever approximate via a guessed string length.
+// Joins `lines` into a Doc - never a plain multi-line string: `printDocToString` doesn't track column
+// position across an embedded `\n` in a string leaf, silently corrupting fits/width decisions for
+// whatever prints after it. `useAmbientIndent` picks the line-break primitive: `hardline` (adds ambient
+// indentation from wherever this Doc nests) once `lines` has had its base depth stripped; `literalline`
+// (adds none) when `lines` already carries its own full, absolute indentation - raw passthrough text, or
+// `perltidy`'s unstripped output for a marker inside `<pre>`. Either way, `breakParent` forces every
+// enclosing HTML element to expand rather than collapse, which the old placeholder-padding approach
+// could only approximate via a guessed string length.
 //
-// Wrapped in `group()` rather than left as a bare array: `fill` (what prettier's HTML printer uses for
-// text mixed with inline content, e.g. "See" next to this marker) decides whether two neighboring pieces
-// fit on the same line via a `mustBeFlat` fits-check that, for a plain array, stops measuring at the
-// first hardline it meets and reports "fits" - so a marker whose *first* line is short would stay glued
-// to "See" regardless of how much wider its later lines are. A `group()` containing a hardline is marked
-// `.break = true` by `propagateBreaks` before printing starts, and the same `mustBeFlat` check rejects an
-// already-broken group immediately - correctly treating the whole marker as not fitting whenever it's
-// multi-line at all, matching how a real multi-line element (e.g. a wrapping `<a>` tag) already behaves.
+// Wrapped in `group()`, not left as a bare array: `fill` (used for text mixed with inline content, e.g.
+// "See" next to a marker) checks fit via `mustBeFlat`, which for a bare array stops measuring at the
+// first `hardline` and reports "fits" - so a marker's first line staying short would keep it glued to
+// "See" regardless of later lines. `propagateBreaks` marks a `group()` containing a `hardline` as broken
+// before printing starts, and `mustBeFlat` rejects an already-broken group immediately - correctly
+// treating any multi-line marker as not fitting, matching how a real multi-line element already behaves.
 const linesToDoc = (lines: string[], useAmbientIndent: boolean): Doc => {
     if (lines.length === 1) return lines[0];
     const lineBreak = useAmbientIndent ? doc.builders.hardline : doc.builders.literalline;
     return doc.builders.group(doc.builders.join(lineBreak, lines));
 };
 
-// Pass 1 (see `embed`) splices each reformat-eligible marker's own *raw* text (not yet run through
-// `perltidy`) in place of its placeholder, using the same `linesToDoc` shape the final splice falls back
-// to for raw passthrough - so prettier's own fits/break decisions in this throwaway pass already see a
-// structurally accurate shape, rather than a flat, length-guessed placeholder. A flat placeholder was
-// tried first (padded to varying lengths - first line, widest line), but no single length works: too
-// narrow under-estimates a real tag's own "should I stay glued to this" decision (e.g. `<p><%= ... %>`),
-// while too wide can *also* be wrong for a different reason - a very long flat string glued into an
-// attribute value can trip prettier's own attribute-wrapping logic in a way the real, `group()`-wrapped
-// multi-line content spliced in by Pass 2 never does, since that group's forced-break state (not its raw
-// width) is what actually governs the final fits decision there. Splicing the real (if not yet tidied)
-// text sidesteps guessing a length entirely: prettier's own fits/break algorithm sees genuinely
-// multi-line content exactly when the marker's own source is multi-line, matching how Pass 2's real
-// splice will behave once `perltidy` finishes. The placeholder id itself stays glued to the front of the
-// first line, so `extractMarkerDepths` can still find where each marker landed once this is flattened.
+// Splices each reformat-eligible marker's own *raw* text (not yet run through `perltidy`) in place of
+// its placeholder, via the same `linesToDoc` shape the final splice falls back to for raw passthrough -
+// so this throwaway pass's fits/break decisions already see a structurally accurate shape rather than a
+// flat, length-guessed placeholder (no fixed length works: too narrow under-estimates a tag's "stay
+// glued" decision, too wide can trip attribute-wrapping logic the real spliced content never does). The
+// placeholder id stays glued to the first line so `extractMarkerDepths` can find where each marker landed.
 const buildPass1MarkerDoc = (id: number, marker: MarkerInfo): Doc => {
     const lines = marker.text.split('\n');
     lines[0] = makePlaceholder(id) + lines[0];
@@ -739,24 +702,15 @@ const buildReformattedDoc = async (
 
     if (perltidyLines.length === 1) {
         const flatDoc = suffix ? `${firstPart} ${suffix}` : firstPart;
-        // `perltidy`'s own width budget only accounts for `depth`/`printWidth`, not real neighboring
-        // text on the same line (e.g. `class="foo <%= ... %> bar"`) - it can decide a marker's body
-        // fits on one line when the *real*, glued-together line doesn't. Offering prettier's own
-        // fits-check both this flat form and a forced-multi-line fallback via `conditionalGroup` fixes
-        // this: `fits` naturally accounts for real neighboring content on both sides (the current
-        // running column for what precedes, and looking ahead into what prints next for what follows),
-        // so it picks the fallback exactly when the flat form genuinely doesn't fit, matching a real
-        // multi-line tag's own attribute-wrapping behavior. Only for an inline marker, though: an
-        // own-line marker is always wrapped in `MARKER_WRAPPER_OPEN_TAG`, and that wrapper's own
-        // scaffolding text - `WRAPPER_CLOSE_TAG`, stripped later during text post-processing - sits
-        // immediately after it in the skeleton and would count against the same lookahead fits-check,
-        // producing a false "doesn't fit" for content that perltidy already correctly budgeted for
-        // (verified against real own-line markers that fit comfortably: without this guard, `fits`'s
-        // lookahead past the marker's own content into that scaffolding text pushed several of them
-        // over budget and wrapped them unnecessarily). An own-line marker's width budget is already
-        // exactly right - nothing real ever shares its line - so it just keeps the flat form as-is,
-        // and `<pre>`'s own boundaries need to stay exactly glued regardless of width, so that's
-        // excluded too.
+        // `perltidy`'s width budget only accounts for `depth`/`printWidth`, not real neighboring text on
+        // the same line (e.g. `class="foo <%= ... %> bar"`), so it can size a marker's body to fit when
+        // the real, glued-together line doesn't. `conditionalGroup` offers prettier's own fits-check both
+        // this flat form and a forced-multi-line fallback, which correctly accounts for real neighboring
+        // content on both sides. Scoped to inline markers only: an own-line marker's
+        // `MARKER_WRAPPER_OPEN_TAG` scaffolding (stripped later) sits right after it and would falsely
+        // count against the same fits-check, and its width budget is already exactly right since nothing
+        // real shares its line. `<pre>`'s own boundaries must stay exactly glued regardless of width, so
+        // that's excluded too.
         if (insidePre || ownLine) return flatDoc;
         const brokenDoc = doc.builders.group([
             prefix,
@@ -767,11 +721,10 @@ const buildReformattedDoc = async (
         return doc.builders.conditionalGroup([flatDoc, brokenDoc]);
     }
 
-    // Outside `<pre>`, ambient Doc-level indentation supplies the base depth automatically once this is
-    // spliced into the tree, so perltidy's own baked-in `depth`-prefix is stripped from every line to
-    // avoid doubling it. Inside `<pre>`, this is spliced in with no such ambient mechanism (see
-    // `linesToDoc`), so perltidy's own full indentation - which already lands exactly at `depth`,
-    // matching wherever `<pre>` itself sits - is kept exactly as produced instead.
+    // Outside `<pre>`, ambient Doc-level indentation supplies the base depth once spliced in, so
+    // perltidy's own baked-in `depth`-prefix is stripped from every line to avoid doubling it. Inside
+    // `<pre>` there's no such ambient mechanism (see `linesToDoc`), so perltidy's full indentation -
+    // already landing exactly at `depth` - is kept as produced instead.
     const stripDepth = insidePre ? 0 : depth;
     const lastLine = perltidyLines[perltidyLines.length - 1];
     // "Back at base depth" - a real closer, not a deeper continuation line - is judged from the
@@ -818,11 +771,10 @@ const buildMarkerDoc = async (
 };
 
 // Splices every `reformat`-eligible marker's placeholder out for its real Doc (built above), walking the
-// html Doc tree with `doc.utils.mapDoc` *before* printing - so prettier's own fits/break algorithm sees
-// the marker's true shape directly instead of a padded guess once it actually runs. A placeholder for a
-// marker with no entry in `markerDocs` (structural markers, and region markers - both stay on the
-// existing text-substitution path in `stripWrappersAndSubstitute`) is left as literal placeholder text,
-// resolved later exactly as today.
+// html Doc tree with `doc.utils.mapDoc` *before* printing - so prettier's fits/break algorithm sees the
+// marker's true shape directly instead of a padded guess. A placeholder with no entry in `markerDocs`
+// (structural/region markers, which stay on the text-substitution path in `stripWrappersAndSubstitute`)
+// is left as literal text, resolved later as today.
 const spliceMarkerDocs = (htmlDoc: Doc, markerDocs: Map<number, Doc>): Doc =>
     doc.utils.mapDoc(htmlDoc, (node) => {
         if (typeof node !== 'string') return node;
@@ -1030,10 +982,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
             printWidth: options.printWidth ?? 80
         };
 
-        // Pass 1: a throwaway HTML layout of the skeleton, with each reformat-eligible marker's own raw
-        // text spliced in (see `buildPass1MarkerDoc`), used only to learn each marker's real structural
-        // depth (see `extractMarkerDepths`) - `perltidy`'s own width-aware wrapping decisions need it,
-        // and it can't be known before some HTML-aware layout has run.
+        // Pass 1: throwaway HTML layout of the skeleton (see `buildPass1MarkerDoc`/`extractMarkerDepths`).
         const doc1 = await textToDoc(skeleton, { parser: 'html' });
         const pass1Docs = new Map<number, Doc>();
         for (let id = 0; id < markers.length; id++) {
@@ -1044,8 +993,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
         const { formatted: formatted1 } = doc.printer.printDocToString(splicedDoc1, printOpts);
         const depths = extractMarkerDepths(formatted1, markers, indentUnit);
 
-        // Between passes: every marker with real Perl content - own-line or inline, `<pre>`-interior or
-        // not - gets tidied now that its depth is known.
+        // Between passes: every marker with real Perl content gets tidied now that its depth is known.
         const markerDocs = new Map<number, Doc>();
         for (let id = 0; id < markers.length; id++) {
             const marker = markers[id];
@@ -1053,9 +1001,8 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
             markerDocs.set(id, await buildMarkerDoc(marker, depths.get(id) ?? 0, indentUnit, perltidyContext));
         }
 
-        // Pass 2: a fresh HTML layout of the same skeleton, with each reformat-eligible marker's
-        // placeholder spliced out for its real Doc before prettier's own fits/break decisions run - so
-        // they see the marker's true shape directly, with no padding guesswork involved.
+        // Pass 2: fresh HTML layout with each marker's placeholder spliced out for its real Doc before
+        // prettier's fits/break decisions run.
         const doc2 = await textToDoc(skeleton, { parser: 'html' });
         const splicedDoc = spliceMarkerDocs(doc2, markerDocs);
         const { formatted: formatted2 } = doc.printer.printDocToString(splicedDoc, printOpts);
