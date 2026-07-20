@@ -1,0 +1,17 @@
+<div class="m-3 overflow-auto">
+	% if (@perlCriticViolations) {
+		<ul class="list-group">
+			% for (@perlCriticViolations) {
+				<li class="list-group-item">
+					<div><%= $_->to_string %></div>
+					<div>
+						See <%= link_to(
+							($_->policy =~ s/^Perl::Critic::Policy:://r) => 'https://metacpan.org/pod/' . $_->policy,
+							target => '_blank'
+						) %>.
+					</div>
+				</li>
+			% }
+		</ul>
+	% }
+</div>

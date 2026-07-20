@@ -1,0 +1,4 @@
+<script>
+	const webworkConfig = <%== $c->webwork_js_config($showMathJaxErrors) %>;
+	const total = <%= $count %>;
+</script>

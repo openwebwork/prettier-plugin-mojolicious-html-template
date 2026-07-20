@@ -1,0 +1,3 @@
+<div>
+	<pre><%= $codeFormatter->($code, { wrapLongLines => 1, useNBSP => 1, someOtherOption => 0, embedOptions => { embedOption1 => 'something' } }) %></pre>
+</div>

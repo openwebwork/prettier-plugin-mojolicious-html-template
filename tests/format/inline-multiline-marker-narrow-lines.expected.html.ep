@@ -1,0 +1,27 @@
+<div class="m-3 overflow-auto">
+	% if (@perlCriticViolations) {
+		<ul class="list-group">
+			% for (@perlCriticViolations) {
+				<li class="list-group-item">
+					<div><%= $_->to_string %></div>
+					<div>
+						See
+						<%= link_to(
+							'https://metacpan.org/pod',
+							target => '_blank',
+							data   => {
+								value1 => 1,
+								value2 => 2,
+								value3 => 3,
+								value4 => 4,
+								value5 => 5,
+								value6 => 6,
+								value7 => 7
+							}
+						) %>.
+					</div>
+				</li>
+			% }
+		</ul>
+	% }
+</div>
