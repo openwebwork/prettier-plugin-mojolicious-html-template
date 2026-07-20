@@ -8,10 +8,7 @@ export interface MojoNode {
     children: MojoNode[];
 }
 
-// Converts a Lezer parse tree into a plain object tree that's simple to walk directly (via
-// `.children`) rather than needing a TreeCursor, both for our own printer logic and for prettier's
-// AstPath machinery (which needs plain properties, not a TreeCursor, if it's ever asked to navigate
-// this AST - see the note on `printMojoNode` in printer.ts for why that's normally unreachable).
+// Converts a Lezer parse tree into a plain object tree, walkable via `.children` without a TreeCursor.
 export const treeToAst = (tree: Tree, source: string): MojoNode => {
     const convert = (cursor: TreeCursor): MojoNode => {
         const node: MojoNode = {

@@ -1,12 +1,7 @@
 #!/usr/bin/env perl
 
-# Persistent worker used by src/mojo/perltidy.ts instead of shelling out to the `perltidy` binary once
-# per marker/region - see the "perltidy worker" section of CLAUDE.local.md for why. Speaks newline-
-# delimited JSON on stdin/stdout: each request is `{"id":N,"args":[...],"source":"..."}` on its own
-# line, each response is `{"id":N,"ok":true|false,"output":"..."}` on its own line, always in the same
-# order requests arrive in (this process handles one request at a time, so no explicit correlation
-# beyond echoing `id` back is needed, but it's included anyway since it's essentially free and makes the
-# protocol robust against a future change on either side).
+# Persistent worker used by src/mojo/perltidy.ts. Speaks newline-delimited JSON on stdin/stdout:
+# `{"id":N,"args":[...],"source":"..."}` in, `{"id":N,"ok":true|false,"output":"..."}` out.
 
 use strict;
 use warnings;
@@ -29,12 +24,8 @@ while (my $line = <STDIN>) {
 
     my $dest   = '';
     my $stderr = '';
-    # `-se` (already always included by the caller) folds what would otherwise be a `.ERR` file into
-    # `$stderr` instead - without it, a source snippet `perltidy` can't parse writes a real `perltidy.ERR`
-    # file into this process's cwd, which would otherwise mean a malformed template leaves stray files
-    # scattered in the user's project (verified empirically). `eval` guards against `Perl::Tidy::perltidy`
-    # dying outright on a truly catastrophic input - it's meant to return a non-zero error code for
-    # ordinary failures, but this worker must survive either way to keep serving later requests.
+    # `-se` folds a would-be `.ERR` file into `$stderr` instead. `eval` guards against
+    # `Perl::Tidy::perltidy` dying outright, so this worker survives to serve later requests either way.
     my $ok = eval {
         my $error = Perl::Tidy::perltidy(
             source      => \$source,
