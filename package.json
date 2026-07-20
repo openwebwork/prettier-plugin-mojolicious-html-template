@@ -1,9 +1,14 @@
 {
     "name": "prettier-mojolicious-html-template",
-    "description": "Prettier Mojolicious template file plugin.",
+    "version": "0.0.1",
+    "description": "Prettier Mojolicious template file plugin",
     "author": "Glenn Rice <drgrice1@missouriwestern.edu>",
     "license": "LGPL-3.0-or-later",
-    "version": "0.0.1",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/drgrice1/prettier-mojolicious-html-template.git"
+    },
+    "homepage": "https://github.com/drgrice1/prettier-mojolicious-html-template",
     "type": "module",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
