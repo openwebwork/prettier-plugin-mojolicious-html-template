@@ -149,7 +149,7 @@ const needsOwnLineAnchor = (node: MojoNode): boolean => node.type === 'Block' ||
 // author deliberately wrote on its own, already-isolated line (must stay separate).
 const BACKSLASH_NEWLINE_RE = /\\\n/g;
 const withBackslashContinuationAnchors = (text: string): string =>
-    text.replace(BACKSLASH_NEWLINE_RE, (match, offset: number) => {
+    text.replace(BACKSLASH_NEWLINE_RE, (_match, offset: number) => {
         const precedingChar = offset > 0 ? text[offset - 1] : undefined;
         const isGlued = precedingChar !== undefined && !/\s/.test(precedingChar);
         const backslashText = isGlued ? GLUED_BACKSLASH_SENTINEL : '\\';

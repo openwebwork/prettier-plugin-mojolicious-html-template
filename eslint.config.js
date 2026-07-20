@@ -49,10 +49,9 @@ export default [
                 'error',
                 { named: 'never', anonymous: 'always', asyncArrow: 'ignore' }
             ],
-            //'@stylistic/space-in-parens': ['error', 'never'],
             '@stylistic/space-infix-ops': ['error'],
 
-            '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+            '@typescript-eslint/no-unused-vars': ['error', { args: 'all', argsIgnorePattern: '^_' }],
             '@typescript-eslint/consistent-type-imports': ['error'],
 
             'no-void': 'off',
