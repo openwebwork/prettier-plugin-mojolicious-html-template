@@ -1,0 +1,5 @@
+<div class="row">
+	<pre class="PGCodeMirror m-0 h-100 p-3 border border-secondary overflow-scroll"><% =%>\
+		<%= $_->{code} =%>\
+	</pre>
+</div>

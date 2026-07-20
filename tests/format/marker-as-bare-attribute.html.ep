@@ -1,0 +1,4 @@
+<div id="problem_body" class="problem-content"
+	<%== $c->output_problem_lang_and_dir %>>
+	<%= $c->output_problem_body =%>
+</div>

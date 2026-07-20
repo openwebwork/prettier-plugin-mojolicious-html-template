@@ -17,6 +17,19 @@ const MARKER_PAD = String.fromCharCode(0xe002);
 // source - see `withBackslashContinuationAnchors`'s own comment for why this needs to be distinguished
 // from an ordinary, already-isolated backslash line.
 const GLUED_BACKSLASH_SENTINEL = String.fromCharCode(0xe003);
+// Stands in for a single ordinary space that must not become a line-break opportunity during this
+// pass - see `registerMarker`'s "reflow can't be allowed to strand an inline marker alone on its own
+// line" comment for why this exists. Restored to a literal space (never left in the rendered output)
+// by `stripWrappersAndSubstitute`.
+const NO_BREAK_SENTINEL = String.fromCharCode(0xe004);
+// Marks the position immediately after a `<pre ...>` tag whose own content doesn't already start with
+// a real newline - see the comment on its insertion (near `PRE_OPEN_TAG_RE`) for why prettier's own
+// `<pre>` handling needs this flagged and undone in `stripWrappersAndSubstitute`.
+const PRE_GLUE_SENTINEL = String.fromCharCode(0xe005);
+// Marks a `PlainMarker` glued (no whitespace) directly to a real HTML tag's own `>` on its preceding
+// side - see `precededByRealTagBoundary`'s own comment for why this needs its own protection distinct
+// from `NO_BREAK_SENTINEL`.
+const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 
 // `<ol data-mojo-wrapper>` rather than a made-up tag name: prettier's HTML printer's own source
 // (the `tr()` helper in its HTML plugin) only forces an element's children onto their own indented
@@ -313,6 +326,53 @@ const isInsidePre = (skeletonSoFar: string): boolean => {
     return opens > closes;
 };
 
+// Independent of the anchor-suppression above: prettier's HTML printer unconditionally prepends a
+// literal newline to a `<pre>` element's own content whenever that content spans multiple lines and
+// doesn't *already* start with one - regardless of Mojo, regardless of any anchor, and regardless of
+// whether the content was glued directly to the opening tag's `>` or merely started with a plain space
+// (verified directly against plain HTML: `<pre> ZZZ\ntext</pre>` and `<pre>ZZZ\ntext</pre>` both come
+// back as `<pre>\n ZZZ\ntext</pre>` / `<pre>\nZZZ\ntext</pre>` - prettier adds the newline either way,
+// but leaves a genuine `<pre>\nZZZ...` completely untouched, since it already satisfies the rule). This
+// inserted newline is harmless for actual rendering - browsers already strip a newline immediately
+// after `<pre>`/`<textarea>` per the HTML spec - but it silently changes the *template's own source
+// text*, and `stripWrappersAndSubstitute`'s `insidePreContent` tracking (which assumes the `<pre ...>`
+// line's own structure is exactly what the source had) then preserves that changed structure verbatim,
+// one line down, at whatever indentation prettier's inserted break happened to leave it (none at all -
+// prettier's own inserted newline carries no indentation of its own, since adding any would actually
+// change the rendered `<pre>` content, unlike the newline itself). Found against a real template,
+// `SampleProblemViewer/sample_problem.html.ep`: `<pre class="...">` immediately followed by `<% =%>\`
+// (glued, matching the source exactly) came back as `<pre class="...">` on its own line followed by a
+// *second* line consisting of
+// just the marker's own placeholder and backslash at column 0 - not a cosmetic quirk, but real, visible
+// corruption once substituted back in.
+//
+// Fixed the same way as the other reflow-instability sentinels in this file: rather than trying to
+// *prevent* prettier's insertion (not possible without also preventing the multi-line layout itself),
+// mark every position where it's *going* to happen with `PRE_GLUE_SENTINEL` immediately after the
+// `<pre ...>` tag's own `>` - prettier still inserts its newline (now landing between `>` and the
+// sentinel, exactly the same way it would land between `>` and real content), but the sentinel is
+// otherwise inert to HTML and travels with whatever it was glued to, letting `stripWrappersAndSubstitute`
+// find it as the very first thing on the first `insidePreContent` line and merge that line straight back
+// onto the `<pre ...>` line above it, undoing prettier's split entirely. Only inserted when the `<pre>`
+// tag's own immediately-following character in the *source* isn't already a real newline, matching
+// prettier's own trigger condition precisely - a `<pre>\ncontent` in the true source needs no help at
+// all, since prettier already leaves that shape completely alone.
+const insertPreGlueSentinel = (text: string): { text: string; deferredToNextNode: boolean } => {
+    let deferredToNextNode = false;
+    const withSentinel = text.replace(PRE_OPEN_TAG_RE, (match: string, offset: number) => {
+        const matchEnd = offset + match.length;
+        if (matchEnd === text.length) {
+            // The tag is the very last thing in this `Text` node - whatever immediately follows it is
+            // part of the *next* node (Text or Marker), not yet known here, so the sentinel has to be
+            // deferred to whichever node comes next (mirrors `pendingFollowingGlue`'s own reasoning).
+            deferredToNextNode = true;
+            return match;
+        }
+        return text[matchEnd] === '\n' ? match : match + PRE_GLUE_SENTINEL;
+    });
+    return { text: withSentinel, deferredToNextNode };
+};
+
 // Reconstructs the real Perl source a region's nodes represent, so the whole region can be sent to
 // `perltidy` as one ordinary program. Any marker with real content (bare `%` line, or a structural
 // Open/Mid/Close - both are just "`%` + Perl text") contributes its text with the leading `%` stripped
@@ -361,18 +421,101 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     let skeleton = '';
     let counter = 0;
 
+    // True if nothing but horizontal whitespace separates `node` from the preceding newline (or file
+    // start) - i.e. real content (prose or a tag boundary - `source` doesn't distinguish them) sits
+    // somewhere else entirely, not sharing `node`'s own line.
+    const precededByRealContent = (node: MojoNode): boolean => {
+        let i = node.start - 1;
+        while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) i--;
+        return i >= 0 && source[i] !== '\n';
+    };
+    // Same as `precededByRealContent`, looking forward from `node.end` instead.
+    const followedByRealContent = (node: MojoNode): boolean => {
+        let j = node.end;
+        while (j < source.length && (source[j] === ' ' || source[j] === '\t')) j++;
+        return j < source.length && source[j] !== '\n';
+    };
+    // True if real content touches `node.end` directly, with *no* whitespace at all in between (as
+    // opposed to `followedByRealContent`, which also accepts real content separated by an ordinary,
+    // reflow-collapsible space/tab run). This adjacency can never change on any future formatting pass
+    // - there's no whitespace there for reflow to touch in the first place - unlike an *ordinary* space
+    // gap, which prettier's own layout decisions (e.g. collapsing a block element's children onto its
+    // opening line when they fit) can turn into a zero-gap adjacency on a *later* pass even though it
+    // wasn't one originally. See `registerMarker`'s own comment for why this matters.
+    const followedByZeroGapRealContent = (node: MojoNode): boolean => {
+        if (node.end >= source.length) return false;
+        const c = source[node.end];
+        return c !== ' ' && c !== '\t' && c !== '\n';
+    };
+    // Same as `followedByZeroGapRealContent`, looking backward from `node.start` instead.
+    const precededByZeroGapRealContent = (node: MojoNode): boolean => {
+        if (node.start <= 0) return false;
+        const c = source[node.start - 1];
+        return c !== ' ' && c !== '\t' && c !== '\n';
+    };
+    // True if `node` is glued (no whitespace) directly to a real HTML tag's own `>` - an opening tag's
+    // (`<div><%= x %>`) or a closing tag's (`</pre><% =%>`), either way - as opposed to another Mojo
+    // marker's own `%>` delimiter (excluded by requiring the character *before* the `>` not be `%`,
+    // since that's Mojo's own closing sequence, never a real HTML tag's). A block-level HTML element's
+    // own tag boundary is *not* leading/trailing-space-sensitive to prettier's HTML printer - unlike an
+    // inline element's (`<span>`, already handled correctly elsewhere in this file) - so prettier freely
+    // separates glued content next to it onto its own line regardless of `printWidth` or content length,
+    // completely independent of Mojo (verified directly against plain HTML with zero Mojo involved:
+    // `<div>x</div>zzz`, `<pre>x</pre>zzz`, and even `<div>zzz<colgroup></colgroup></div>` - glued
+    // content on *either* side of a block element's own tag - all come back with a forced line break
+    // inserted at the exact glued boundary, with no `printWidth`-driven middle ground).
+    //
+    // On its own this separation is usually harmless: for an *ordinary*, output-producing marker
+    // (`<%= ... %>`) sitting in normal text flow, the newline prettier inserts lands as leading/trailing
+    // whitespace around real text content inside a normal (non-`<pre>`) block element, which HTML
+    // collapses away visually regardless (verified against the already-established
+    // `quote-like-operators`/`pure-perl-blank-after-impure` fixtures, both of which *already* correctly
+    // allow this kind of separation - `<div><%= maketext(...) %>` and `<p><%= maketext(...) =%></p>`
+    // both freely reflow onto multiple lines with no protection needed).
+    //
+    // It stops being harmless specifically when the marker is itself glued *forward* to a backslash too
+    // (`node.end` immediately followed by `\`) - that combination is Mojo's own idiom for suppressing
+    // *all* whitespace at this exact point (typically a no-output `<% =%>` used purely as a whitespace-
+    // control device, as in `</pre><% =%>\`), and separating the marker from what precedes it inserts a
+    // newline with nothing downstream able to suppress it (the backslash only ever suppresses the
+    // newline *after* the marker's own `%>`, never anything before it) - a real, silent change to the
+    // rendered output, not merely cosmetic. Found against a real template,
+    // `SampleProblemViewer/sample_problem.html.ep`'s `</pre><% =%>\` (the marker's own trailing backslash
+    // was already protected by `GLUED_BACKSLASH_SENTINEL`, but nothing protected the *marker itself* from
+    // being separated from `</pre>`). This is a different, independent failure mode from what
+    // `NO_BREAK_SENTINEL` protects against: that mechanism deliberately treats an already-zero-gap side
+    // as *permanently safe* and skips protecting it, which is correct for `isOwnLine` stability (the only
+    // thing it's guarding against) but doesn't account for prettier separating an already-glued boundary
+    // anyway, for this completely unrelated reason.
+    const precededByRealTagBoundary = (node: MojoNode): boolean =>
+        node.start > 1 && source[node.start - 1] === '>' && source[node.start - 2] !== '%' && source[node.end] === '\\';
     // True if nothing but horizontal whitespace separates `node` from the newlines (or file
     // boundaries) on either side of it - i.e. the user wrote it alone on its own line, as opposed to
     // embedded inline with surrounding text (`Hello, <%= $name %>!`).
-    const isOwnLine = (node: MojoNode): boolean => {
-        let i = node.start - 1;
-        while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) i--;
-        let j = node.end;
-        while (j < source.length && (source[j] === ' ' || source[j] === '\t')) j++;
-        return (i < 0 || source[i] === '\n') && (j >= source.length || source[j] === '\n');
-    };
+    const isOwnLine = (node: MojoNode): boolean => !precededByRealContent(node) && !followedByRealContent(node);
+
+    // Set by `registerMarker` right after emitting an inline (non-own-line) `PlainMarker` whose
+    // *following* side is what real content sits on (rather than its preceding side) - consumed by the
+    // very next `Text` node's own emission in `visitSequence`, which glues its leading whitespace to
+    // this marker the same way `registerMarker` glues a marker's *preceding* side inline. Only one of
+    // these is ever pending at a time, since it's set and consumed within the same `visitSequence` pass
+    // over sibling nodes, never nested.
+    let pendingFollowingGlue = false;
+    // Same deferral pattern as `pendingFollowingGlue`, for `insertPreGlueSentinel`'s own "the `<pre ...>`
+    // tag was the very last thing in this Text node" case - set when that happens, consumed by whichever
+    // node (Text or Marker) comes next, which gets `PRE_GLUE_SENTINEL` prepended to its own leading edge.
+    let pendingPreGlue = false;
 
     const registerMarker = (node: MojoNode) => {
+        // Consume a pending "the previous `<pre ...>` tag was the last thing in its own Text node"
+        // request from `insertPreGlueSentinel` - this marker is the first thing after it, so it gets the
+        // sentinel prepended directly (a marker's own placeholder never legitimately starts with a
+        // newline, so there's no "already correct, skip it" case to check here unlike the Text-node
+        // consumer below).
+        if (pendingPreGlue) {
+            skeleton += PRE_GLUE_SENTINEL;
+            pendingPreGlue = false;
+        }
         const id = counter++;
         const ownLine = isOwnLine(node);
         const reformat = node.type === 'PlainMarker' && ownLine ? splitMarkerDelimiters(node.text) : undefined;
@@ -397,10 +540,94 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // element to HTML: wrapping it forces it to keep its own line the same way real markup would.
         // Structural markers (Open/Mid/Close) don't need this: their own-line separation from sibling
         // content is already handled by the empty-wrapper-separator logic in `visitSequence` below.
-        skeleton +=
-            node.type === 'PlainMarker' && ownLine
-                ? `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`
-                : placeholder;
+        if (node.type === 'PlainMarker' && ownLine) {
+            skeleton += `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
+            return;
+        }
+
+        // An inline marker that *isn't* own-line is just plain reflowable text as far as prettier's
+        // HTML printer is concerned, and a long enough surrounding sentence can legitimately wrap right
+        // before or after it purely for width reasons (`WeBWorK using host: ... course: <%= $courseID %>`
+        // wrapping to put the last marker alone on its own output line, found against a real template,
+        // `RPCRenderFormats/default.html.ep`). That's fine on its own, but reformatting *that output* as
+        // fresh input is indistinguishable, character-for-character, from the user having genuinely
+        // written this marker alone on its own line - `isOwnLine` (correctly, from that fresh input's
+        // perspective) then says `true`, and the marker gets wrapped in `MARKER_WRAPPER_OPEN_TAG` on the
+        // second pass even though nothing about the *template* changed, only how a previous run happened
+        // to wrap a long sentence - a real idempotency break (format(format(x)) != format(x)), not just a
+        // cosmetic one, since where a marker is wrapped affects the surrounding indentation.
+        //
+        // Fixed by guaranteeing that whichever side of this marker has real content next to it (the same
+        // side(s) `isOwnLine` itself found) can never *degrade* into looking like a lone newline boundary
+        // after formatting - replace the single whitespace character immediately on that side with
+        // `NO_BREAK_SENTINEL`, an ordinary non-whitespace character that prettier's HTML reflow can't
+        // treat as a break point (verified directly: HTML text-fill only ever breaks at whitespace, never
+        // splits what looks like one contiguous "word"), later restored to a literal space by
+        // `stripWrappersAndSubstitute` so it never appears in the rendered output.
+        //
+        // Gluing a side is skipped whenever the *other* side already touches real content with zero gap
+        // - that adjacency can never change on any future pass (there's no whitespace there for reflow to
+        // touch), so it alone keeps `isOwnLine` false forever, making protection on this side redundant.
+        // Redundant gluing isn't just wasted effort here - it's actively harmful in two different,
+        // independently-found ways: inside an HTML tag's own attribute list, gluing the *preceding* side
+        // when the marker is itself a "bare attribute" already glued to the tag's own closing `>` (a
+        // common idiom - `<div ... <%== $lang_dir %>>`) makes prettier's attribute printer re-insert its
+        // own normalized separator space before what it reads as the next attribute regardless of
+        // whether the source had any whitespace there, so the sentinel survives glued to the marker's
+        // placeholder *in addition to* prettier's own inserted space - two spaces once the sentinel
+        // converts back to a literal one, instead of the original single space (found against
+        // `ContentGenerator/Problem.html.ep`'s `<div id="problem_body" class="problem-content" <%==
+        // $c->output_problem_lang_and_dir %>>`, whose attribute-value quote collapsing onto the marker's
+        // own line - itself harmless - triggered exactly this). And gluing the *following* side when the
+        // marker is itself already glued to a preceding tag's own closing `>` (`<div><%= maketext(...)
+        // %> <strong>...`) prevents prettier from ever breaking between the marker and whatever legitimately
+        // needs to wrap next to it, forcing an unwanted `<strong\n\t>` split where a clean break onto its
+        // own line was both possible and expected (found against the `quote-like-operators` fixture).
+        //
+        // This leaves one known, narrower gap: if a side only becomes zero-gap *after* a previous pass's
+        // own, otherwise-harmless reflow (rather than being zero-gap in the true original source), the
+        // *other* side's separating space can still be silently dropped a pass later, since by then this
+        // side's own zero-gap status (indistinguishable, from parsed text alone, from having always been
+        // zero-gap) causes protection to be skipped. Found in two different shapes, both pre-existing and
+        // unrelated to any change in this session - even the original, pre-glue code already silently
+        // dropped these same spaces unconditionally, just doing so consistently on every pass rather than
+        // only after the first one: (1) `HelpFiles/Hardcopy.html.ep`, where a `<dd>` collapses onto a
+        // multi-line marker's own opening line once formatted; (2) `HelpFiles/InstructorSendMail.html.ep`,
+        // where prettier's own, completely ordinary HTML normalization drops the insignificant trailing
+        // whitespace before a `</p>` (verified with zero Mojo involved: plain `<p> text\n</p>` alone
+        // already collapses to `<p>text</p>`) - the following pass then sees the marker directly glued to
+        // `</p>`. Distinguishing "zero-gap from the start" from "zero-gap because of a previous pass's own
+        // harmless reflow" isn't possible from parsed text alone, and the two other bugs this symmetric
+        // check fixes are more actively harmful (corrupted attribute lists; forced, unwanted line splits)
+        // than this narrower one (an already-uncommon shape silently losing one space between passes), so
+        // this is the accepted trade-off rather than a further-unresolved regression.
+        //
+        // The preceding side is handled here directly, since `skeleton`'s own trailing character *is*
+        // that whitespace by construction (the preceding `Text` node was already appended); the following
+        // side can't be touched yet (the next `Text` node hasn't been visited), so it's deferred via
+        // `pendingFollowingGlue` for `visitSequence` to apply when it gets there.
+        //
+        // `<pre>` content is never reflowed by prettier's HTML printer in the first place (see
+        // `isInsidePre`'s own comment), so it was never at risk of this instability and doesn't need -
+        // or safely tolerate - this protection: `stripWrappersAndSubstitute`'s `insidePreContent` branch
+        // passes `<pre>` lines straight through `substituteMarkers` without ever looking for
+        // `NO_BREAK_SENTINEL`, so inserting one here would leak the raw PUA character into rendered
+        // output instead of being converted back to a space.
+        if (node.type === 'PlainMarker' && !isInsidePre(skeleton)) {
+            if (precededByRealContent(node) && !followedByZeroGapRealContent(node) && /[ \t]$/.test(skeleton)) {
+                skeleton = skeleton.slice(0, -1) + NO_BREAK_SENTINEL;
+            }
+            if (followedByRealContent(node) && !precededByZeroGapRealContent(node)) {
+                pendingFollowingGlue = true;
+            }
+            // See `precededByRealTagBoundary`'s own comment - independent of the two checks above, since
+            // this protects against prettier separating an already-zero-gap boundary, not against a gap
+            // degrading into one.
+            if (precededByRealTagBoundary(node)) {
+                skeleton += TAG_GLUE_SENTINEL;
+            }
+        }
+        skeleton += placeholder;
     };
 
     // Registers a maximal run of `isEligibleRegionMember` siblings (see that function and
@@ -480,8 +707,40 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             }
 
             const node = nodes[i];
+            // Consume a pending "glue my following side" request from the immediately preceding inline
+            // marker (see `registerMarker`) - its own preceding side had no real content to glue to, so
+            // whatever comes right after it needs the same "not a line-break opportunity" protection
+            // instead. Captured and cleared unconditionally, regardless of `node`'s own type: the request
+            // only ever applies to the *one* node immediately following the marker that raised it (a
+            // Text node, if there's any whitespace gap at all to glue - if the very next node is instead
+            // another Marker/Block with zero gap, there's nothing to glue and this is simply a no-op),
+            // never a later, unrelated one further down the sequence.
+            const glueLeading = pendingFollowingGlue;
+            pendingFollowingGlue = false;
             if (node.type === 'Text') {
-                skeleton += isInsidePre(skeleton) ? node.text : withBackslashContinuationAnchors(node.text);
+                let text = node.text;
+                const wasInsidePre = isInsidePre(skeleton);
+                // Consume a pending "the previous `<pre ...>` tag was the last thing in its own Text
+                // node" request from `insertPreGlueSentinel` below - this node is the first thing after
+                // it. Skipped if this node's own text already starts with a real newline: that already
+                // satisfies prettier's own trigger condition on its own, with nothing for the sentinel to
+                // fix.
+                if (pendingPreGlue) {
+                    pendingPreGlue = false;
+                    if (!text.startsWith('\n')) text = PRE_GLUE_SENTINEL + text;
+                }
+                if (glueLeading && !wasInsidePre && /^[ \t]/.test(text)) {
+                    text = NO_BREAK_SENTINEL + text.slice(1);
+                }
+                // Only scan for a *newly opening* `<pre ...>` tag within this node's own text when we're
+                // not already inside one - a `<pre` found while `wasInsidePre` is true would be nested,
+                // invalid HTML `isInsidePre` itself already treats as out of scope (see its own comment).
+                if (!wasInsidePre) {
+                    const glued = insertPreGlueSentinel(text);
+                    text = glued.text;
+                    if (glued.deferredToNextNode) pendingPreGlue = true;
+                }
+                skeleton += wasInsidePre ? text : withBackslashContinuationAnchors(text);
                 // Trailing whitespace after the very last node of the whole document needs no anchor:
                 // there's nothing further along to preserve a line break *before*, and adding one here
                 // anyway plants a real trailing element in the skeleton that prettier's HTML printer
@@ -724,9 +983,31 @@ const stripWrappersAndSubstitute = async (
             // literal `\` without merging it anywhere.
         }
 
+        if (trimmed.startsWith(TAG_GLUE_SENTINEL)) {
+            // See `precededByRealTagBoundary`'s own comment - prettier separated a marker from a real
+            // HTML tag boundary it was glued to in the source, unconditionally (verified this happens
+            // regardless of `printWidth` or content length, unlike the whitespace-sensitive-inline case
+            // above), so the merge here is unconditional too: restore the original adjacency by gluing
+            // this line's own content (its marker placeholder, still needing substitution) onto the end
+            // of whatever line was emitted right before it, rather than ever emitting a line of its own.
+            if (output.length > 0) {
+                output[output.length - 1] += substituteMarkers(trimmed.slice(TAG_GLUE_SENTINEL.length), markers);
+            }
+            continue;
+        }
+
         if (insidePreContent) {
             if (trimmed.includes('</pre>')) insidePreContent = false;
-            output.push(line === '' ? '' : substituteMarkers(line, markers));
+            // `PRE_GLUE_SENTINEL` (see its own definition and the insertion site near `PRE_OPEN_TAG_RE`)
+            // marks a line that prettier split off the `<pre ...>` opening tag's own line purely because
+            // its own content didn't already start with a real newline, not because the source had one -
+            // undo that split by gluing this line directly onto the end of the `<pre ...>` line already
+            // pushed to `output`, restoring the original adjacency.
+            if (line.startsWith(PRE_GLUE_SENTINEL) && output.length > 0) {
+                output[output.length - 1] += substituteMarkers(line.slice(PRE_GLUE_SENTINEL.length), markers);
+            } else {
+                output.push(line === '' ? '' : substituteMarkers(line, markers));
+            }
             continue;
         }
 
@@ -780,6 +1061,32 @@ const stripWrappersAndSubstitute = async (
         // above - restore the literal `\` in place here instead.
         if (content.includes(GLUED_BACKSLASH_SENTINEL)) {
             content = content.split(GLUED_BACKSLASH_SENTINEL).join('\\');
+        }
+        // `NO_BREAK_SENTINEL` (see `registerMarker`) only ever stands in for an ordinary space that
+        // must not become a line-break opportunity during *this* formatting pass - once formatting is
+        // done, it always converts back to a literal space, unconditionally, wherever it appears. Unlike
+        // `GLUED_BACKSLASH_SENTINEL`, it can never end up alone on its own line: replacing a space with a
+        // non-whitespace character removes the only place HTML's text-fill could have broken there, so
+        // the sentinel and its neighbors on both sides are permanently glued onto the same output line by
+        // construction - no separate lone-sentinel-line branch is needed here.
+        if (content.includes(NO_BREAK_SENTINEL)) {
+            content = content.split(NO_BREAK_SENTINEL).join(' ');
+        }
+        // `PRE_GLUE_SENTINEL` (see `insertPreGlueSentinel`) only matters when prettier actually splits
+        // the `<pre ...>` tag's own line off from what follows - the `insidePreContent` branch above
+        // handles that case by merging the split line back. When the content was short enough that
+        // prettier left it glued to the `<pre ...>` tag's own line after all (never separated in the
+        // first place), the sentinel just needs deleting outright here - unlike every other sentinel in
+        // this file, it never stands in for any real character of its own.
+        if (content.includes(PRE_GLUE_SENTINEL)) {
+            content = content.split(PRE_GLUE_SENTINEL).join('');
+        }
+        // `TAG_GLUE_SENTINEL` (see `precededByRealTagBoundary`) is handled the same way as
+        // `PRE_GLUE_SENTINEL` above - the `startsWith` branch earlier in this loop covers the case where
+        // prettier actually separated it onto its own line (verified this is unconditional, so that's
+        // the expected case in practice), this is just the fallback if it ever survives glued in place.
+        if (content.includes(TAG_GLUE_SENTINEL)) {
+            content = content.split(TAG_GLUE_SENTINEL).join('');
         }
 
         // Each currently-open 'inner'/'marker' wrapper added one indent level HTML would otherwise

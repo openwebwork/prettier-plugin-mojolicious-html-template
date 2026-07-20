@@ -1,0 +1,6 @@
+<head>
+	<title>
+		WeBWorK using host: <%= $SITE_URL %>, format: <%= $formatName %>, seed: <%= $problemSeed %>,
+		course: <%= $courseID %>
+	</title>
+</head>
