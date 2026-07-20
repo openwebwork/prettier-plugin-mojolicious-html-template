@@ -37,13 +37,13 @@ const skipQuoteLikeOperator = (input: InputStream, offset: number): number => {
 
     let o = offset + 1;
     const second = input.peek(o);
-    if (second === LOWER_Q || second === LOWER_W || second === LOWER_R) o++; // qq, qw, qr
+    if (second === LOWER_Q || second === LOWER_W || second === LOWER_R) ++o; // qq, qw, qr
 
-    while (input.peek(o) === SPACE || input.peek(o) === TAB || input.peek(o) === NEWLINE) o++;
+    while (input.peek(o) === SPACE || input.peek(o) === TAB || input.peek(o) === NEWLINE) ++o;
 
     const startDelim = input.peek(o);
     if (startDelim < 0 || isIdentChar(startDelim) || startDelim === SPACE || startDelim === TAB) return offset;
-    o++;
+    ++o;
 
     const endDelim = QUOTE_LIKE_CLOSERS[startDelim] ?? startDelim;
     let depth = 1;
@@ -54,9 +54,9 @@ const skipQuoteLikeOperator = (input: InputStream, offset: number): number => {
             o += 2;
             continue;
         }
-        if (endDelim !== startDelim && c === startDelim) depth++;
-        else if (c === endDelim) depth--;
-        o++;
+        if (endDelim !== startDelim && c === startDelim) ++depth;
+        else if (c === endDelim) --depth;
+        ++o;
     }
     return o;
 };
@@ -71,15 +71,15 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
     if (c === HASH && input.peek(offset - 1) !== DOLLAR) {
         // `$#array` is Perl's "last index" sigil, not a comment.
         let o = offset + 1;
-        while (input.peek(o) !== NEWLINE && input.peek(o) !== -1) o++;
+        while (input.peek(o) !== NEWLINE && input.peek(o) !== -1) ++o;
         return o;
     }
     if ((c === SINGLE_QUOTE || c === DOUBLE_QUOTE) && input.peek(offset - 1) !== BACKSLASH) {
         // A quote preceded by a backslash is an escaped literal (`s/\"//g`), not a string opener.
         let o = offset + 1;
         while (input.peek(o) !== c && input.peek(o) !== -1) {
-            if (input.peek(o) === BACKSLASH) o++;
-            o++;
+            if (input.peek(o) === BACKSLASH) ++o;
+            ++o;
         }
         if (input.peek(o) === -1) return offset; // unterminated - bail
         return o + 1;
@@ -90,8 +90,8 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
 // Skips the `=`/`==` output sigil (`%=`, `<%=`, `<%==`) so `classify` sees only the Perl content.
 const skipOutputSigil = (input: InputStream, offset: number): number => {
     let o = offset;
-    if (input.peek(o) === EQUALS) o++;
-    if (input.peek(o) === EQUALS) o++;
+    if (input.peek(o) === EQUALS) ++o;
+    if (input.peek(o) === EQUALS) ++o;
     return o;
 };
 
@@ -109,7 +109,7 @@ const classify = (content: string): number => {
 
 const sliceByPeek = (input: InputStream, from: number, to: number): string => {
     let text = '';
-    for (let offset = from; offset < to; offset++) text += String.fromCharCode(input.peek(offset));
+    for (let offset = from; offset < to; ++offset) text += String.fromCharCode(input.peek(offset));
     return text;
 };
 
@@ -117,13 +117,13 @@ const sliceByPeek = (input: InputStream, from: number, to: number): string => {
 // there.
 const percentLineIndent = (input: InputStream, offset: number): number => {
     let ws = 0;
-    while (input.peek(offset + ws) === SPACE || input.peek(offset + ws) === TAB) ws++;
+    while (input.peek(offset + ws) === SPACE || input.peek(offset + ws) === TAB) ++ws;
     return input.peek(offset + ws) === PERCENT ? ws : -1;
 };
 
 const isLineStart = (input: InputStream): boolean => {
     let i = -1;
-    while (input.peek(i) === SPACE || input.peek(i) === TAB) i--;
+    while (input.peek(i) === SPACE || input.peek(i) === TAB) --i;
     const c = input.peek(i);
     return c === NEWLINE || c === -1;
 };
@@ -184,7 +184,7 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
         if (c === -1) break;
         if (c === LT && input.peek(offset + 1) === PERCENT) break;
         if (input.peek(offset - 1) === NEWLINE && percentLineIndent(input, offset) !== -1) break;
-        offset++;
+        ++offset;
     }
     input.acceptToken(Text, offset);
 });

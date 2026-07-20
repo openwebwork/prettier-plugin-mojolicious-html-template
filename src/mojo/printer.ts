@@ -87,7 +87,7 @@ const collapseBlankPercentRuns = (nodes: MojoNode[]): MojoNode[] => {
         const node = nodes[i];
         if (!isBlankPercentLine(node)) {
             result.push(node);
-            i++;
+            ++i;
             continue;
         }
         result.push(node);
@@ -98,9 +98,9 @@ const collapseBlankPercentRuns = (nodes: MojoNode[]): MojoNode[] => {
             const next = nodes[j];
             if (next.type === 'Text' && next.text.trim() === '') {
                 trailingConnector = next;
-                j++;
+                ++j;
             } else if (isBlankPercentLine(next)) {
-                j++;
+                ++j;
             } else {
                 break;
             }
@@ -172,7 +172,7 @@ const isInsidePre = (skeletonSoFar: string): boolean => {
 // `<%== get_attrs(...) %>` into a `<div ...>`) can't use the own-line `<colgroup>` wrapper - nesting an
 // element inside another tag's attribute list is invalid HTML and crashes prettier's HTML parser.
 const isInsideOpenTagAttrs = (skeletonSoFar: string): boolean => {
-    for (let i = skeletonSoFar.length - 1; i >= 0; i--) {
+    for (let i = skeletonSoFar.length - 1; i >= 0; --i) {
         const c = skeletonSoFar[i];
         if (c === '>') return false;
         if (c === '<') return /[a-zA-Z/]/.test(skeletonSoFar[i + 1] ?? '');
@@ -233,13 +233,13 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // True if only horizontal whitespace separates `node` from the preceding newline (or file start).
     const precededByRealContent = (node: MojoNode): boolean => {
         let i = node.start - 1;
-        while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) i--;
+        while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) --i;
         return i >= 0 && source[i] !== '\n';
     };
     // Same as `precededByRealContent`, looking forward from `node.end`.
     const followedByRealContent = (node: MojoNode): boolean => {
         let j = node.end;
-        while (j < source.length && (source[j] === ' ' || source[j] === '\t')) j++;
+        while (j < source.length && (source[j] === ' ' || source[j] === '\t')) ++j;
         return j < source.length && source[j] !== '\n';
     };
     // True if real content touches `node.end` with zero whitespace - an adjacency that can never change
@@ -358,9 +358,9 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                 while (j < nodes.length) {
                     const candidate = nodes[j];
                     if ((candidate.type === 'Text' && candidate.text.trim() === '') || isBlankPercentLine(candidate)) {
-                        j++;
+                        ++j;
                     } else if (isEligibleRegionMember(candidate)) {
-                        j++;
+                        ++j;
                         end = j;
                     } else {
                         break;
@@ -407,7 +407,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                     // connectors to find the real next node.
                     let next = i + 1;
                     while (next < nodes.length && nodes[next].type === 'Text' && nodes[next].text.trim() === '') {
-                        next++;
+                        ++next;
                     }
                     if (next < nodes.length && needsOwnLineAnchor(nodes[next])) {
                         skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
@@ -416,7 +416,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             } else {
                 visitNode(node);
             }
-            i++;
+            ++i;
         }
     };
 
@@ -494,7 +494,7 @@ const classifyWrapperCloses = (formatted: string): boolean[] => {
 // `perltidy` itself does.
 const visualColumn = (line: string, endIndex: number, useTabs: boolean, tabWidth: number): number => {
     let col = 0;
-    for (let i = 0; i < endIndex; i++) {
+    for (let i = 0; i < endIndex; ++i) {
         col += useTabs && line[i] === '\t' ? tabWidth - (col % tabWidth) : 1;
     }
     return col;
@@ -516,7 +516,7 @@ const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line:
     for (const line of formatted.split('\n')) {
         const trimmed = line.trim();
         if (trimmed === WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG) {
-            wrapperCloseIndex++;
+            ++wrapperCloseIndex;
             continue;
         }
         if (trimmed === WRAPPER_OPEN_TAG) {
@@ -547,7 +547,7 @@ const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line:
         } else {
             const cancelLevels = stack.filter((entry) => entry === 'marker' || entry === 'inner').length;
             let indent = line.slice(0, line.length - line.trimStart().length);
-            for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); i++)
+            for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); ++i)
                 indent = indent.slice(indentUnit.length);
             depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
         }
@@ -576,7 +576,7 @@ const extractMarkerDepths = (formatted: string, markers: MarkerInfo[], indentUni
 // (e.g. a closing brace `perltidy` welded back to a lower depth) rather than blindly trimming.
 const stripDepthPrefix = (line: string, indentUnit: string, depth: number): string => {
     let result = line;
-    for (let i = 0; i < depth && result.startsWith(indentUnit); i++) result = result.slice(indentUnit.length);
+    for (let i = 0; i < depth && result.startsWith(indentUnit); ++i) result = result.slice(indentUnit.length);
     return result;
 };
 
@@ -673,7 +673,7 @@ const buildReformattedDoc = async (
                 perltidyContext.tabWidth
             );
             const pad = ' '.repeat(prefix.length + 1);
-            for (let i = 1; i < perltidyLines.length; i++) {
+            for (let i = 1; i < perltidyLines.length; ++i) {
                 const arrowIndex = perltidyLines[i].indexOf('=>');
                 if (arrowIndex === -1) continue;
                 const arrowColumn = visualColumn(
@@ -863,7 +863,7 @@ const stripWrappersAndSubstitute = async (
         if (trimmed === emptySeparator) {
             // This `</colgroup>` is ours, but still counts toward `classifyWrapperCloses`'s occurrence
             // order.
-            wrapperCloseIndex++;
+            ++wrapperCloseIndex;
             continue; // empty content-wrapper separator, collapsed onto one line
         }
         if (trimmed === WRAPPER_OPEN_TAG) {
@@ -922,7 +922,7 @@ const stripWrappersAndSubstitute = async (
         let indent = line.slice(0, line.length - line.trimStart().length);
         // One `indentUnit` per level, not per character - with `useTabs`, one tab is one level
         // regardless of `tabWidth`.
-        for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); i++)
+        for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); ++i)
             indent = indent.slice(indentUnit.length);
 
         // A pure-Perl region (see `registerRegion`/`flattenNode`): every returned line is symmetric -
@@ -985,7 +985,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
         // Pass 1: throwaway HTML layout of the skeleton (see `buildPass1MarkerDoc`/`extractMarkerDepths`).
         const doc1 = await textToDoc(skeleton, { parser: 'html' });
         const pass1Docs = new Map<number, Doc>();
-        for (let id = 0; id < markers.length; id++) {
+        for (let id = 0; id < markers.length; ++id) {
             const marker = markers[id];
             if (marker.reformat) pass1Docs.set(id, buildPass1MarkerDoc(id, marker));
         }
@@ -995,7 +995,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
 
         // Between passes: every marker with real Perl content gets tidied now that its depth is known.
         const markerDocs = new Map<number, Doc>();
-        for (let id = 0; id < markers.length; id++) {
+        for (let id = 0; id < markers.length; ++id) {
             const marker = markers[id];
             if (!marker.reformat) continue;
             markerDocs.set(id, await buildMarkerDoc(marker, depths.get(id) ?? 0, indentUnit, perltidyContext));

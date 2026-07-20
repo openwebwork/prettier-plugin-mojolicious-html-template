@@ -125,11 +125,11 @@ const spawnPerltidy = (args: string[], input: string): Promise<{ code: number | 
     const id = nextRequestId++;
     return new Promise((resolve) => {
         pendingRequests.set(id, (result) => {
-            pendingCount--;
+            --pendingCount;
             if (pendingCount === 0) setWorkerReferenced(false);
             resolve(result);
         });
-        pendingCount++;
+        ++pendingCount;
         setWorkerReferenced(true);
         activeWorker.stdin.write(`${JSON.stringify({ id, args, source: input })}\n`);
     });
@@ -157,7 +157,7 @@ export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): P
     // until two consecutive passes agree.
     let text = input;
     let stdout = '';
-    for (let iteration = 0; iteration < 4; iteration++) {
+    for (let iteration = 0; iteration < 4; ++iteration) {
         const result = await spawnPerltidy(args, text);
         if (result.code !== 0) return null;
         stdout = result.stdout;
