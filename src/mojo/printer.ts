@@ -45,10 +45,15 @@ const CONTENT_INNER_CLOSE_TAG = '</address>';
 // records whether the marker sits inside `<pre>` in the source, since a `<pre>`-interior marker's real
 // content must be spliced in without adding any ambient indentation - `<pre>`'s own boundaries must not
 // gain or lose so much as one character of surrounding whitespace, even though whitespace *inside* the
-// marker's own delimiters never affects what's actually rendered.
+// marker's own delimiters never affects what's actually rendered. `ownLine` records whether the marker
+// sat alone on its own source line - see `buildReformattedDoc`'s single-line case for why it matters
+// there specifically (an own-line marker is always wrapped in `MARKER_WRAPPER_OPEN_TAG`, whose own
+// scaffolding text sits immediately after it in the skeleton and would otherwise count against a
+// width-fallback fits-check meant only for markers with *real* neighboring content).
 interface MarkerInfo {
     text: string;
     insidePre: boolean;
+    ownLine: boolean;
     reformat?: { prefix: string; body: string; suffix: string };
     region?: { body: string };
 }
@@ -277,7 +282,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         const ownLine = isOwnLine(node);
         const insidePre = isInsidePre(skeleton);
         const reformat = node.type === 'PlainMarker' ? splitMarkerDelimiters(node.text) : undefined;
-        markers[id] = { text: node.text, insidePre, reformat };
+        markers[id] = { text: node.text, insidePre, ownLine, reformat };
         const placeholder = makePlaceholder(id);
 
         // A bare placeholder is just text to HTML and reflows regardless of source formatting; an
@@ -324,7 +329,12 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             .map((n) => n.text)
             .join('')
             .trim();
-        markers[id] = { text, insidePre: false, region: { body: nodes.map(flattenNode).join('').trim() } };
+        markers[id] = {
+            text,
+            insidePre: false,
+            ownLine: true,
+            region: { body: nodes.map(flattenNode).join('').trim() }
+        };
         const placeholder = makePlaceholder(id);
         skeleton += `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
     };
@@ -629,6 +639,7 @@ const buildPass1MarkerDoc = (id: number, marker: MarkerInfo): Doc => {
 const buildReformattedDoc = async (
     reformat: NonNullable<MarkerInfo['reformat']>,
     insidePre: boolean,
+    ownLine: boolean,
     depth: number,
     indentUnit: string,
     perltidyContext: PerltidyContext
@@ -709,7 +720,33 @@ const buildReformattedDoc = async (
     const firstPart = `${prefix} ${firstLine}`;
 
     if (perltidyLines.length === 1) {
-        return suffix ? `${firstPart} ${suffix}` : firstPart;
+        const flatDoc = suffix ? `${firstPart} ${suffix}` : firstPart;
+        // `perltidy`'s own width budget only accounts for `depth`/`printWidth`, not real neighboring
+        // text on the same line (e.g. `class="foo <%= ... %> bar"`) - it can decide a marker's body
+        // fits on one line when the *real*, glued-together line doesn't. Offering prettier's own
+        // fits-check both this flat form and a forced-multi-line fallback via `conditionalGroup` fixes
+        // this: `fits` naturally accounts for real neighboring content on both sides (the current
+        // running column for what precedes, and looking ahead into what prints next for what follows),
+        // so it picks the fallback exactly when the flat form genuinely doesn't fit, matching a real
+        // multi-line tag's own attribute-wrapping behavior. Only for an inline marker, though: an
+        // own-line marker is always wrapped in `MARKER_WRAPPER_OPEN_TAG`, and that wrapper's own
+        // scaffolding text - `WRAPPER_CLOSE_TAG`, stripped later during text post-processing - sits
+        // immediately after it in the skeleton and would count against the same lookahead fits-check,
+        // producing a false "doesn't fit" for content that perltidy already correctly budgeted for
+        // (verified against real own-line markers that fit comfortably: without this guard, `fits`'s
+        // lookahead past the marker's own content into that scaffolding text pushed several of them
+        // over budget and wrapped them unnecessarily). An own-line marker's width budget is already
+        // exactly right - nothing real ever shares its line - so it just keeps the flat form as-is,
+        // and `<pre>`'s own boundaries need to stay exactly glued regardless of width, so that's
+        // excluded too.
+        if (insidePre || ownLine) return flatDoc;
+        const brokenDoc = doc.builders.group([
+            prefix,
+            doc.builders.indent([doc.builders.hardline, firstLine]),
+            doc.builders.hardline,
+            suffix
+        ]);
+        return doc.builders.conditionalGroup([flatDoc, brokenDoc]);
     }
 
     // Outside `<pre>`, ambient Doc-level indentation supplies the base depth automatically once this is
@@ -749,6 +786,7 @@ const buildMarkerDoc = async (
         const reformatted = await buildReformattedDoc(
             marker.reformat,
             marker.insidePre,
+            marker.ownLine,
             depth,
             indentUnit,
             perltidyContext

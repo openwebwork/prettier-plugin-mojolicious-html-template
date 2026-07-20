@@ -1,0 +1,3 @@
+% content_for css => begin
+	<%= stylesheet getAssetURL($ce, 'js/Achievements/achievements.css') =%>
+% end

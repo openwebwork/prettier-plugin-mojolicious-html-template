@@ -1,0 +1,15 @@
+<div class="row">
+	% for (@$blocks) {
+		<div class="row">
+			<div class="col-sm-12 col-md-6 order-md-first order-last p-0 position-relative overflow-hidden">
+				<div
+					class="explanation <%=
+						$_->{section}
+					%> col-sm-12 col-md-6 order-md-last p-3 order-first border border-dark"
+				>
+					<p><b><%= ucfirst( $_->{section} ) %></b></p>
+				</div>
+			</div>
+		</div>
+	% }
+</div>
