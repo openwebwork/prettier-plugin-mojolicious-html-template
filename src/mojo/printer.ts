@@ -174,6 +174,20 @@ const isInsidePre = (skeletonSoFar: string): boolean => {
     return opens > closes;
 };
 
+// Whether `skeletonSoFar` currently sits inside a real HTML tag's still-open angle brackets (a `<name`
+// with no closing `>` yet) - found by scanning backward for the nearest real `<` or `>`, not a real
+// parser. A marker positioned here (e.g. splicing extra attributes via `<%== get_attrs(...) %>` into a
+// `<div ...>`) can't use the own-line `<colgroup>` wrapper: nesting an element inside another tag's own
+// attribute list is invalid HTML and crashes prettier's HTML parser on this skeleton.
+const isInsideOpenTagAttrs = (skeletonSoFar: string): boolean => {
+    for (let i = skeletonSoFar.length - 1; i >= 0; i--) {
+        const c = skeletonSoFar[i];
+        if (c === '>') return false;
+        if (c === '<') return /[a-zA-Z/]/.test(skeletonSoFar[i + 1] ?? '');
+    }
+    return false;
+};
+
 // prettier's HTML printer unconditionally inserts a newline right after a `<pre ...>` tag's own `>`
 // whenever its content spans multiple lines and doesn't already start with one - harmless for rendering,
 // but it changes the template's own source structure that `insidePreContent` tracking (in
@@ -279,7 +293,11 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             pendingPreGlue = false;
         }
         const id = counter++;
-        const ownLine = isOwnLine(node);
+        // A marker that's alone on its own source line but sits inside another tag's still-open
+        // attribute list (see `isInsideOpenTagAttrs`) can't be treated as own-line here: nothing else
+        // is around it on that source line, but structurally it's inline content within the enclosing
+        // tag, not a content-flow sibling, so the own-line `<colgroup>` wrapper below doesn't apply.
+        const ownLine = isOwnLine(node) && !isInsideOpenTagAttrs(skeleton);
         const insidePre = isInsidePre(skeleton);
         const reformat = node.type === 'PlainMarker' ? splitMarkerDelimiters(node.text) : undefined;
         markers[id] = { text: node.text, insidePre, ownLine, reformat };
