@@ -5,8 +5,9 @@
 % # Exit if there is no global achievement data for this user.
 % unless (defined $c->{globalData}) {
     <p>
-        <%= maketext(
-            q{You don't have any Achievement data associated to you!}) =%>
+        <%=
+            maketext(q{You don't have any Achievement data associated to you!})
+        =%>
     </p>
     % last;
 % }

@@ -759,15 +759,33 @@ const buildReformattedDoc = async (
     // multi-line tag, where the closing delimiter is free to land on its own line.
     const mustGlueSuffix = /\bbegin\s*$/.test(body.trim());
     // `perltidy`'s own width budget doesn't know the result is about to be glued onto Mojo delimiters -
-    // subtract their overhead so the reconstructed line stays within `printWidth`.
-    const delimiterOverhead = prefix.length + 1 + (suffix ? suffix.length + 1 : 0);
+    // compensate so the reconstructed line stays within `printWidth`. Only one of `prefix`/`suffix` ever
+    // glues onto any single perltidy-produced line for a genuinely multi-line result (`prefix` onto the
+    // first line only, `suffix` onto the last only, per `firstPart`/the final `parts` entry below) -
+    // summing both would overcorrect every line by the other delimiter's width it never actually carries,
+    // wrapping a last line that would otherwise fit (confirmed against a real template,
+    // `siblings.html.ep`: a `maketext(...)` call that fits exactly under `printWidth` with the closing
+    // `=%>` glued on was getting needlessly split). The single-line case (`perltidyLines.length === 1`
+    // below) glues *both* onto the same line, but already has its own `conditionalGroup`/`brokenDoc`
+    // fallback to correct for that regardless.
+    const delimiterOverhead = Math.max(prefix.length + 1, suffix ? suffix.length + 1 : 0);
     // A bare `<%= %>`/`%=` expression body has no trailing `;` by convention, but `perltidy` aligns
     // `?:`/`=>` chains differently for a statement with no closing `;` - append one when missing and
     // strip it back off the result's last line afterward.
     const hadTrailingSemicolon = body.trimEnd().endsWith(';');
     const perltidyInput = hadTrailingSemicolon ? body : `${body};`;
     // The synthetic `;` itself counts against perltidy's width budget - compensate so it doesn't wrap
-    // one column early.
+    // one column early. Strictly speaking this only benefits whichever line ends up carrying the `;`
+    // (always the *last* line) - `runPerltidy` takes one width for the whole call, so this compensation
+    // is applied to every line, including a first line that never carries it. That's an accepted,
+    // narrow trade-off: leaving it uncompensated instead avoids over-crediting the first line, but then
+    // under-credits the (far more commonly width-critical) last line by the same one column, which is
+    // what this compensation exists to fix in the first place (confirmed against a real template,
+    // `siblings.html.ep` - see `delimiterOverhead` above). Rare enough in practice that only one file in
+    // a 268-file real-corpus sweep exceeded `printWidth`, by exactly one column, from this asymmetry
+    // (`HTML/CodeMirrorEditor/js.html.ep`) - not solvable without either a second, stricter-budget
+    // `perltidy` call to specifically re-check the first line, or reintroducing a length heuristic this
+    // whole Doc-splicing design exists to avoid.
     const semicolonCompensation = hadTrailingSemicolon ? 0 : 1;
     const perltidyLines = await runPerltidy(perltidyInput, {
         configPath: perltidyContext.perltidyrcPath,
@@ -834,18 +852,33 @@ const buildReformattedDoc = async (
         // the same line (e.g. `class="foo <%= ... %> bar"`), so it can size a marker's body to fit when
         // the real, glued-together line doesn't. `conditionalGroup` offers prettier's own fits-check both
         // this flat form and a forced-multi-line fallback, which correctly accounts for real neighboring
-        // content on both sides. Scoped to inline markers only: an own-line marker's
-        // `MARKER_WRAPPER_OPEN_TAG` scaffolding (stripped later) sits right after it and would falsely
-        // count against the same fits-check, and its width budget is already exactly right since nothing
-        // real shares its line. `<pre>`'s own boundaries must stay exactly glued regardless of width, so
-        // that's excluded too.
-        if (insidePre || ownLine || mustGlueSuffix) return flatDoc;
+        // content on both sides. `<pre>`'s own boundaries and a `begin` marker's mandatory glue must stay
+        // exactly as-is regardless of width, so both skip any fits-check entirely.
+        if (insidePre || mustGlueSuffix) return flatDoc;
         const brokenDoc = doc.builders.group([
             prefix,
             doc.builders.indent([doc.builders.hardline, firstLine]),
             doc.builders.hardline,
             suffix
         ]);
+        // An own-line marker isn't glued to any real neighboring content, so `conditionalGroup`'s
+        // Doc-based fits-check would be polluted by its own always-adjacent scaffolding wrapper the same
+        // way the comment above describes - but that doesn't mean `flatDoc` is guaranteed to fit either:
+        // a marker can *look* own-line on a later pass purely because an earlier pass's own `brokenDoc`
+        // fallback isolated its prefix/suffix onto their own lines, with nothing but whitespace now
+        // adjacent to either - `isOwnLine` can't tell that apart from a marker genuinely alone in the
+        // source. Checked directly here instead, by plain string width (not a Doc fits-check, so no
+        // scaffolding pollution risk): confirmed non-idempotent otherwise, via a real template
+        // (`pure-perl-blank-any-impure`-shaped case) where an inline marker's `brokenDoc` fallback, fed
+        // back in on a second pass, got misread as own-line and re-collapsed past `printWidth` with no
+        // check at all.
+        if (ownLine) {
+            const fullLine = indentUnit.repeat(depth) + flatDoc;
+            const fits =
+                visualColumn(fullLine, fullLine.length, perltidyContext.useTabs, perltidyContext.tabWidth) <=
+                perltidyContext.printWidth;
+            return fits ? flatDoc : brokenDoc;
+        }
         return doc.builders.conditionalGroup([flatDoc, brokenDoc]);
     }
 
