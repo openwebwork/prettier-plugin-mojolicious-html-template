@@ -908,8 +908,17 @@ const stripWrappersAndSubstitute = async (
         if (content.includes(GLUED_BACKSLASH_SENTINEL)) {
             content = content.split(GLUED_BACKSLASH_SENTINEL).join('\\');
         }
-        // Converts back to a literal space; can never end up alone on its own line.
+        // Converts back to a literal space - except right at this (trimmed) line's own edge, where it
+        // resolves to nothing instead. A sentinel can end up there when whatever it was guarding against
+        // reflowing next to gets separated onto its own line anyway by unrelated HTML layout (e.g. an
+        // attribute list wrapping one-per-line) - the real newline already provides the separation, so a
+        // literal space there would be a redundant leading/trailing space, and - since whether that
+        // separation happens depends on layout decisions made by *this* pass, not by anything in the
+        // marker's own original source shape - a non-idempotent one: a later pass, seeing the marker
+        // already own-line, wouldn't regenerate it.
         if (content.includes(NO_BREAK_SENTINEL)) {
+            if (content.startsWith(NO_BREAK_SENTINEL)) content = content.slice(NO_BREAK_SENTINEL.length);
+            if (content.endsWith(NO_BREAK_SENTINEL)) content = content.slice(0, -NO_BREAK_SENTINEL.length);
             content = content.split(NO_BREAK_SENTINEL).join(' ');
         }
         // Deletes outright when content stayed glued to the `<pre ...>` line - unlike other sentinels,

@@ -22,8 +22,7 @@ consistently formatted, with the HTML and the Perl each laid out by the tool tha
   collapse blank lines elsewhere.
 - Picks up an existing `.perltidyrc` (searched for starting from the template's own directory and walking
   upward) so embedded Perl follows the same style as the rest of a project's Perl code.
-- Idempotent for nearly all templates: formatting an already-formatted file produces no changes. A small
-  number of shapes are a known exception and currently need a second formatting pass to settle.
+- Idempotent: formatting an already-formatted file produces no changes.
 - Degrades gracefully if `perltidy` isn't installed - the HTML still gets formatted; embedded Perl is left
   as written, with a one-time warning.
 

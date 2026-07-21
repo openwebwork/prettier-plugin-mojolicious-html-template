@@ -1,0 +1,7 @@
+<div
+	class="problem-content text-dark col-lg-10"
+	<%== get_problem_lang_and_dir( $pg->{flags}, $ce->{perProblemLangAndDirSettingMode}, $ce->{language} ) %>
+	data-bs-theme="light"
+>
+	Content
+</div>
