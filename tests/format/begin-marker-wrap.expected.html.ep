@@ -3,7 +3,6 @@
 	enctype => 'application/x-www-form-urlencoded',
 	name    => 'formName',
 	id      => 'formId',
-	begin
-=%>
+	begin =%>
 	<p>Content</p>
 <% end =%>

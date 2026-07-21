@@ -637,6 +637,11 @@ const buildReformattedDoc = async (
     // the synthetic `;` alone as an empty statement, which reconstructs as a stray double space between
     // the delimiters. Left as raw passthrough instead, preserving the original exactly.
     if (body.trim() === '') return undefined;
+    // A marker ending in `begin` (the same trailing-`begin` shape `classify` in tokens.ts uses to open a
+    // Block) needs its closing delimiter glued to the same line as `begin` unconditionally - confirmed
+    // against real Mojolicious templates that `<%= ..., begin\n=%>` fails to compile, unlike an ordinary
+    // multi-line tag, where the closing delimiter is free to land on its own line.
+    const mustGlueSuffix = /\bbegin\s*$/.test(body.trim());
     // `perltidy`'s own width budget doesn't know the result is about to be glued onto Mojo delimiters -
     // subtract their overhead so the reconstructed line stays within `printWidth`.
     const delimiterOverhead = prefix.length + 1 + (suffix ? suffix.length + 1 : 0);
@@ -718,7 +723,7 @@ const buildReformattedDoc = async (
         // count against the same fits-check, and its width budget is already exactly right since nothing
         // real shares its line. `<pre>`'s own boundaries must stay exactly glued regardless of width, so
         // that's excluded too.
-        if (insidePre || ownLine) return flatDoc;
+        if (insidePre || ownLine || mustGlueSuffix) return flatDoc;
         const brokenDoc = doc.builders.group([
             prefix,
             doc.builders.indent([doc.builders.hardline, firstLine]),
@@ -740,11 +745,12 @@ const buildReformattedDoc = async (
     const middleParts = perltidyLines.slice(1, -1).map((line) => stripDepthPrefix(line, indentUnit, stripDepth));
     const strippedLastLine = stripDepthPrefix(lastLine, indentUnit, stripDepth);
 
-    // The closing delimiter glues onto the last line only when it's back at the marker's own depth,
-    // the same way prettier itself collapses a multi-line tag's closing `>` onto its last attribute
-    // line when there's nothing deeper to close over; otherwise it gets its own line.
+    // The closing delimiter glues onto the last line when it's back at the marker's own depth, the same
+    // way prettier itself collapses a multi-line tag's closing `>` onto its last attribute line when
+    // there's nothing deeper to close over; otherwise it gets its own line - unless `mustGlueSuffix`
+    // forces gluing regardless of depth.
     const parts =
-        lastLineIndent === firstLineIndent
+        mustGlueSuffix || lastLineIndent === firstLineIndent
             ? [firstPart, ...middleParts, suffix ? `${strippedLastLine} ${suffix}` : strippedLastLine]
             : [firstPart, ...middleParts, strippedLastLine, suffix];
 
