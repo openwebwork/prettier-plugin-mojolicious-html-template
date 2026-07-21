@@ -1,0 +1,5 @@
+<%= form_for current_route, method => 'POST', begin =%>
+	% if (1) {
+		<div>Shown</div>
+	% }
+<% end =%>

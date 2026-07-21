@@ -1,0 +1,5 @@
+<div>
+	<%= link_to $c->systemLink( url_for 'logout' ), class => 'btn btn-light btn-sm ms-2', begin %>
+		<%= maketext('Log Out') %> <i class="icon fas fa-sign-out-alt" aria-hidden="true"></i>
+	<% end %>
+</div>

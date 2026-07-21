@@ -1,0 +1,6 @@
+<div>
+    <label for="local_sets">Add problems to <b>Target Set:</b></label>
+    <%= label_for 'local_sets', begin =%>
+        Add problems to <b>Target Set:</b>
+    <% end =%>
+</div>

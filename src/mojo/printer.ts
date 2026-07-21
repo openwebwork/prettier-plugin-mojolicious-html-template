@@ -27,6 +27,18 @@ const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 const WRAPPER_OPEN_TAG = '<colgroup data-mojo-wrapper>';
 const WRAPPER_CLOSE_TAG = '</colgroup>';
 
+// A wrapper for a tag-form Block's own content (`<%= ..., begin =%> ... <% end =%>`): unlike a Perl
+// control-flow Block's content, which must never collapse onto one line even when short (the reason
+// `WRAPPER_OPEN_TAG` exists at all), a tag-form Block's content is ordinary markup and should lay out
+// exactly like a real HTML element's - collapsing when it fits, wrapping normally when it doesn't, even
+// when glued with zero gap to real content on both sides (the Block's own markers). That last part rules
+// out a block-display tag (`<colgroup>`, `<figcaption>`, `<div>`, ...): a block-display element can never
+// sit inline within a run of text - prettier forces it onto its own line regardless of width, the same
+// unwanted behavior all over again. `<bdi>` is a real inline-display tag with ordinary collapsing
+// behavior and collides least with genuine template markup.
+const TAGFORM_WRAPPER_OPEN_TAG = '<bdi data-mojo-tagform-wrapper>';
+const TAGFORM_WRAPPER_CLOSE_TAG = '</bdi>';
+
 // A second wrapper for a single own-line `PlainMarker`: the same "look like a real element" trick, but
 // without the extra indent level the content wrapper adds.
 const MARKER_WRAPPER_OPEN_TAG = '<colgroup data-mojo-marker>';
@@ -66,6 +78,17 @@ const splitMarkerDelimiters = (text: string): { prefix: string; body: string; su
     }
     return undefined;
 };
+
+// A Block's `OpenMarker` opens it either via a trailing `{` (Perl control-flow: `if`/`unless`/`for`/...)
+// or a trailing `begin` keyword (Mojolicious's block-capture syntax, e.g. `<%= link_to ..., begin =%>`) -
+// `classify` in tokens.ts treats both identically at the grammar level, so the delimiter alone
+// (`<%` vs bare `%`) doesn't distinguish them: `<% if ($error) { =%>` starts with `<%` exactly like a
+// real tag-form marker does, but is genuine Perl control-flow, not a value-capturing block, and needs to
+// stay forced multi-line the same as the bare `% if (...) {` shorthand - confirmed against a real
+// template (`ProblemSetDetail.html.ep`) where treating it as tag-form let its `<div>...</div>` content
+// collapse onto the `<% if ($error) { =%>` line, dragging the closing `<% } =%>` right along with it.
+const isTagFormOpenMarker = (openMarkerText: string): boolean =>
+    /\bbegin\s*$/.test(splitMarkerDelimiters(openMarkerText)?.body ?? '');
 
 // A bare `%` line with real Perl content - not tag-form, not `%=`/`%==`, and not a content-free
 // `%`-alone line (see `isBlankPercentLine`).
@@ -137,8 +160,13 @@ const isPureBlock = (node: MojoNode): boolean =>
 const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(node) || isPureBlock(node);
 
 // A node whose own-line placement relies on the whitespace-anchor mechanism in `visitSequence` below
-// rather than a real wrapper element: a bare `%` line, or a `Block`.
-const needsOwnLineAnchor = (node: MojoNode): boolean => node.type === 'Block' || isBarePercentLine(node);
+// rather than a real wrapper element: a bare `%` line, or a Block genuinely requiring one - a `%`
+// control line must start its own physical line or Mojolicious fails to parse it, and the same is true
+// of the `%` line that opens such a Block, but not of a tag-form Block (`<%= ..., begin =%>`), which has
+// no such restriction and should be free to collapse with its surroundings like any other tag-form
+// marker.
+const needsOwnLineAnchor = (node: MojoNode): boolean =>
+    (node.type === 'Block' && !isTagFormOpenMarker(node.children[0]?.text ?? '')) || isBarePercentLine(node);
 
 // Mojo::Template suppresses a text line's trailing newline when it ends in `\`, joining it directly to
 // what follows in the rendered output. A bare `\<newline>` inside a `Text` node means nothing to HTML,
@@ -298,8 +326,9 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
 
         // A bare placeholder is just text to HTML and reflows regardless of source formatting; an
         // own-line `PlainMarker` needs to look like a real element instead so HTML preserves that
-        // placement. Structural markers don't need this - the empty-wrapper-separator logic in
-        // `visitSequence` already handles their own-line separation.
+        // placement. Most structural markers don't need this - the empty-wrapper-separator logic in
+        // `visitSequence` already handles their own-line separation (a `%`-opened Block, or a bare `%`
+        // control line) - except a tag-form `CloseMarker`, which gets its own, narrower anchor below.
         if (node.type === 'PlainMarker' && ownLine) {
             skeleton += `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
             return;
@@ -310,8 +339,14 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // idempotency. Fixed by replacing the whitespace on whichever side has real content with
         // `NO_BREAK_SENTINEL` (a PUA character reflow can't break at), restored to a literal space
         // afterward. Skipped on a side whose opposite is already zero-gap (redundant gluing there
-        // corrupts attribute lists) and never inside `<pre>`.
-        if (node.type === 'PlainMarker' && !insidePre) {
+        // corrupts attribute lists) and never inside `<pre>`. Not gated on `node.type` (a structural
+        // marker needs this exactly as much as a `PlainMarker` does): structural markers were never
+        // exposed to ambiguous reflow-adjacency before, since they were always forced onto their own
+        // line - now that a tag-form Block's content participates in ordinary reflow (see
+        // `needsOwnLineAnchor`), a structural marker glued to real content inside or around one needs the
+        // same protection, or that adjacency can silently flip between a real source and this plugin's
+        // own reformatted output on a later pass, the same way it always could for a `PlainMarker`.
+        if (!insidePre) {
             if (precededByRealContent(node) && !followedByZeroGapRealContent(node) && /[ \t]$/.test(skeleton)) {
                 skeleton = skeleton.slice(0, -1) + NO_BREAK_SENTINEL;
             }
@@ -323,6 +358,24 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             if (precededByRealTagBoundary(node)) {
                 skeleton += TAG_GLUE_SENTINEL;
             }
+        }
+        // A `CloseMarker`/`MidMarker` that sat alone on its own source line needs an explicit anchor here
+        // regardless of tag-form-ness. A *bare* `%`-line one already can't parse any other way (Mojo
+        // requires a `%` control line to start its own physical line), so this looks redundant for that
+        // shape - except this marker is registered via `flush()`'s own loop, outside `visitSequence`'s
+        // per-node anchor logic entirely (the only place that requirement would otherwise be enforced),
+        // so without this it's just as exposed as the tag-form shape below to reflowing onto whatever
+        // real content happens to precede it, purely because the combined line fits. That's not just a
+        // cosmetic loss of the shape the author actually wrote (see `TAGFORM_WRAPPER_OPEN_TAG`, whose
+        // content a `CloseMarker` here closes) - for the tag-form shape it's unstable across passes,
+        // since "does it fit" depends on width elsewhere in the file that can itself change once
+        // formatted, and for the bare shape it can silently produce a genuinely unparseable template. A
+        // marker genuinely glued zero-gap in the source (`ownLine` false) is unaffected - that adjacency
+        // is real and stays governed by the glue-protection above. (`isPureBlock`/`registerRegion`
+        // intercepts a bare-`%`-only Block before its own structural markers ever reach `registerMarker`
+        // at all, so this never fires redundantly for that path.)
+        if ((node.type === 'CloseMarker' || node.type === 'MidMarker') && ownLine) {
+            skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
         }
         skeleton += placeholder;
     };
@@ -350,7 +403,16 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // A run of sibling nodes. Scans for maximal `isEligibleRegionMember` runs first, registering each as
     // one region; everything else falls through to per-node handling, including a recursed ineligible
     // Block. A whitespace-only Text node not absorbed into a region is purely structural - an empty
-    // wrapper anchors the line break prettier would otherwise collapse away.
+    // wrapper anchors the line break prettier would otherwise collapse away. This applies inside a
+    // tag-form Block's own content too, same as anywhere else - a Text node here is either genuinely
+    // blank (needs the anchor exactly as much as anywhere else) or a real source-level newline separating
+    // real content from what follows (own-line-ness worth preserving there too, not just for markers);
+    // `needsOwnLineAnchor` already returns `false` for a *tag-form* Block specifically, which is the only
+    // thing that actually needs to collapse onto its surroundings, so no separate `insideTagFormBlock`
+    // exception is needed here at all - an earlier version of this comment claimed one was, but that
+    // turned out to be blocking a *nested* bare-`%` Block's own required anchor whenever it sat inside a
+    // tag-form Block's content, corrupting the template (two `%` control lines landing on one physical
+    // line, which Mojolicious can't parse) rather than just looking wrong.
     const visitSequence = (rawNodes: MojoNode[], isTopLevel = false) => {
         const nodes = collapseBlankPercentRuns(rawNodes);
         let i = 0;
@@ -400,6 +462,17 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                     text = glued.text;
                     if (glued.deferredToNextNode) pendingPreGlue = true;
                 }
+                // A Text node's own *leading* newline, immediately followed by real content, marks a
+                // genuine source-level line break between this content and whatever precedes it - always
+                // a marker's placeholder or a Block's open tag, both zero-width/inline in the skeleton.
+                // Without an anchor here, prettier's fill algorithm treats that newline as ordinary
+                // reflow whitespace and may collapse it onto the placeholder's own line. A wholly-blank
+                // Text node doesn't need this (it's handled by its own trailing-anchor case below). Same
+                // exclusion as `ownLine` above: still inside a real tag's open attribute list, an element
+                // here is invalid HTML and crashes prettier's parser.
+                if (/^\n[ \t]*\S/.test(node.text) && !isInsideOpenTagAttrs(skeleton)) {
+                    skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
+                }
                 skeleton += wasInsidePre ? text : withBackslashContinuationAnchors(text);
                 // No anchor after the document's very last node - it would defeat prettier's own
                 // trailing-blank-line stripping.
@@ -429,16 +502,42 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
 
     const visitNode = (node: MojoNode) => {
         if (node.type === 'Block') {
+            // A Block opened by a tag-form marker (`<%= ..., begin =%>`) wraps ordinary markup, not Perl
+            // control-flow - `Block.children[0]` is always the OpenMarker, per the grammar
+            // (`Block { OpenMarker item* (MidMarker item*)* CloseMarker }`). See `isTagFormOpenMarker` for
+            // why this can't just check the delimiter style.
+            const isTagForm = isTagFormOpenMarker(node.children[0]?.text ?? '');
+            const openTag = isTagForm ? TAGFORM_WRAPPER_OPEN_TAG : WRAPPER_OPEN_TAG;
+            const closeTag = isTagForm ? TAGFORM_WRAPPER_CLOSE_TAG : WRAPPER_CLOSE_TAG;
+
             let group: MojoNode[] = [];
             const flush = () => {
                 if (group.length === 0) return;
+                // A Block's content can open with a backslash-continuation glued directly to the marker
+                // that just preceded it (`<% if ($error) { =%>\`) - Mojo::Template's own
+                // newline-suppression syntax, not real content, so it visually belongs on the *marker's*
+                // own line. Left as `group[0]`'s problem, it becomes the block-content wrapper's own
+                // first child instead - and `WRAPPER_OPEN_TAG` (`<colgroup>`) is block-display, which
+                // always pushes even a zero-gap first child onto a new line of its own, same as it would
+                // any real content (confirmed against a real template, `ProblemSetDetail.html.ep`: the
+                // `\` ended up alone on its own line, disconnected from `<% if ($error) { =%>`). Moving it
+                // here, ahead of `openTag`, keeps it glued to the marker as intended - always the glued
+                // shape (`flush` runs immediately after `registerMarker` for whatever marker preceded this
+                // group, with nothing possibly in between), never the loose one `GLUED_BACKSLASH_SENTINEL`
+                // exists to distinguish from.
+                const first = group[0];
+                if (first.type === 'Text' && first.text.startsWith('\\\n')) {
+                    skeleton += GLUED_BACKSLASH_SENTINEL;
+                    group[0] = { ...first, text: first.text.slice(1) };
+                }
                 // The inner wrapper adds a real, later-canceled indent level that compounds across
                 // nested Blocks and inflates prettier's own fits/width computation beyond the real final
-                // depth - only pay for it when actually needed.
-                const needsInner = needsGluedTagProtection(group);
-                skeleton += WRAPPER_OPEN_TAG + (needsInner ? CONTENT_INNER_OPEN_TAG : '');
+                // depth - only pay for it when actually needed, and only for `WRAPPER_OPEN_TAG`, whose
+                // mid-tag-split quirk it exists to work around; `TAGFORM_WRAPPER_OPEN_TAG` doesn't have it.
+                const needsInner = !isTagForm && needsGluedTagProtection(group);
+                skeleton += openTag + (needsInner ? CONTENT_INNER_OPEN_TAG : '');
                 visitSequence(group);
-                skeleton += (needsInner ? CONTENT_INNER_CLOSE_TAG : '') + WRAPPER_CLOSE_TAG;
+                skeleton += (needsInner ? CONTENT_INNER_CLOSE_TAG : '') + closeTag;
                 group = [];
             };
 
@@ -482,20 +581,26 @@ interface PerltidyContext {
     printWidth: number;
 }
 
-// A closing `</colgroup>` can't carry a disambiguating attribute, so a genuine one the template's own
-// HTML contains needs telling apart from this wrapper's own. `<colgroup>` always forces its children
-// onto their own line regardless of author, so a whole-document stack-based pairing scan reliably
-// classifies every occurrence in document order.
-const WRAPPER_TAG_RE = /<colgroup(?:\s[^<>]*)?>|<\/colgroup>/g;
-const classifyWrapperCloses = (formatted: string): boolean[] => {
+// A closing scaffolding tag can't carry a disambiguating attribute, so a genuine one the template's own
+// HTML contains needs telling apart from this plugin's own. Both `<colgroup>` and `<bdi>` behave
+// identically regardless of author for their respective purpose (forced multi-line children; ordinary
+// collapsing), so a whole-document stack-based pairing scan reliably classifies every occurrence in
+// document order.
+const classifyTagCloses = (formatted: string, tagRe: RegExp, closeTag: string, ourOpenTags: string[]): boolean[] => {
     const closes: boolean[] = [];
     const stack: boolean[] = [];
-    for (const match of formatted.matchAll(WRAPPER_TAG_RE)) {
-        if (match[0] === WRAPPER_CLOSE_TAG) closes.push(stack.pop() ?? false);
-        else stack.push(match[0] === WRAPPER_OPEN_TAG || match[0] === MARKER_WRAPPER_OPEN_TAG);
+    for (const match of formatted.matchAll(tagRe)) {
+        if (match[0] === closeTag) closes.push(stack.pop() ?? false);
+        else stack.push(ourOpenTags.includes(match[0]));
     }
     return closes;
 };
+const WRAPPER_TAG_RE = /<colgroup(?:\s[^<>]*)?>|<\/colgroup>/g;
+const TAGFORM_WRAPPER_TAG_RE = /<bdi(?:\s[^<>]*)?>|<\/bdi>/g;
+const classifyWrapperCloses = (formatted: string): boolean[] =>
+    classifyTagCloses(formatted, WRAPPER_TAG_RE, WRAPPER_CLOSE_TAG, [WRAPPER_OPEN_TAG, MARKER_WRAPPER_OPEN_TAG]);
+const classifyTagformWrapperCloses = (formatted: string): boolean[] =>
+    classifyTagCloses(formatted, TAGFORM_WRAPPER_TAG_RE, TAGFORM_WRAPPER_CLOSE_TAG, [TAGFORM_WRAPPER_OPEN_TAG]);
 
 // The visual column `line[0..endIndex)` ends at, expanding tabs to the next `tabWidth` stop the way
 // `perltidy` itself does.
@@ -513,7 +618,9 @@ const visualColumn = (line: string, endIndex: number, useTabs: boolean, tabWidth
 const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line: string, depth: number) => void) => {
     const stack: ('content' | 'marker' | 'inner')[] = [];
     const wrapperCloseIsOurs = classifyWrapperCloses(formatted);
+    const tagformCloseIsOurs = classifyTagformWrapperCloses(formatted);
     let wrapperCloseIndex = 0;
+    let tagformCloseIndex = 0;
     // A line whose content starts with `PRE_GLUE_SENTINEL` is where prettier's own newline, inserted
     // right after a `<pre ...>` tag, landed - that newline carries no indentation of its own (see
     // `insertPreGlueSentinel`), so this line's *own* leading whitespace understates where it actually
@@ -526,7 +633,11 @@ const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line:
             ++wrapperCloseIndex;
             continue;
         }
-        if (trimmed === WRAPPER_OPEN_TAG) {
+        if (trimmed === TAGFORM_WRAPPER_OPEN_TAG + TAGFORM_WRAPPER_CLOSE_TAG) {
+            ++tagformCloseIndex;
+            continue;
+        }
+        if (trimmed === WRAPPER_OPEN_TAG || trimmed === TAGFORM_WRAPPER_OPEN_TAG) {
             stack.push('content');
             continue;
         }
@@ -540,6 +651,11 @@ const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line:
         }
         if (trimmed === WRAPPER_CLOSE_TAG) {
             if (wrapperCloseIsOurs[wrapperCloseIndex++] ?? false) {
+                stack.pop();
+                continue;
+            }
+        } else if (trimmed === TAGFORM_WRAPPER_CLOSE_TAG) {
+            if (tagformCloseIsOurs[tagformCloseIndex++] ?? false) {
                 stack.pop();
                 continue;
             }
@@ -804,13 +920,35 @@ const stripWrappersAndSubstitute = async (
     indentUnit: string,
     perltidyContext: PerltidyContext
 ): Promise<string> => {
-    const lines = formatted.split('\n');
+    // prettier splits a whitespace-sensitive inline element's own closing `</tag` from its final `>`,
+    // pushing the `>` onto its own line glued to whatever follows, to preserve exact zero-gap adjacency
+    // when a `TAGFORM_WRAPPER_CLOSE_TAG` collapses glued to real content on both sides (see
+    // `TAGFORM_WRAPPER_OPEN_TAG`). Separately, when `TAGFORM_WRAPPER_OPEN_TAG` is glued to a long
+    // preceding marker, prettier can wrap its own (fake, single) attribute across multiple lines the same
+    // way it would a real attribute list that doesn't fit - `<bdi\n\tdata-mojo-tagform-wrapper\n>`. Both
+    // are reassembled here, before anything else, so every check below sees each tag exactly as if it
+    // were never split - every occurrence of either tag is normalized back to its canonical one-line
+    // form regardless of internal whitespace, and `formatted` is re-derived for the classification calls
+    // just below so their own document-order counting matches this merged shape too.
+    // A third shape: a *preceding sibling's* own closing tag (e.g. an empty `</colgroup>` wrapper that's
+    // the last child before `</bdi>`) gets its own final `>` split onto its own line, glued to `</bdi>`
+    // for the same zero-gap-preservation reason - not `</bdi>`'s own tag text, so the first replacement
+    // above doesn't catch it. General across whichever tag precedes it: any bare `>` immediately before
+    // `</bdi>` on its own line is always this split, never real content.
+    const mergedTagformSplit = formatted
+        .replaceAll(new RegExp(`${TAGFORM_WRAPPER_CLOSE_TAG.slice(0, -1)}\\n\\s*>`, 'g'), TAGFORM_WRAPPER_CLOSE_TAG)
+        .replaceAll(/<bdi\s+data-mojo-tagform-wrapper\s*>/g, TAGFORM_WRAPPER_OPEN_TAG)
+        .replaceAll(new RegExp(`\\n[ \\t]*>(?=${TAGFORM_WRAPPER_CLOSE_TAG})`, 'g'), '>');
+    const lines = mergedTagformSplit.split('\n');
     const output: string[] = [];
     const stack: ('content' | 'marker' | 'inner')[] = [];
-    const wrapperCloseIsOurs = classifyWrapperCloses(formatted);
+    const wrapperCloseIsOurs = classifyWrapperCloses(mergedTagformSplit);
+    const tagformCloseIsOurs = classifyTagformWrapperCloses(mergedTagformSplit);
     let wrapperCloseIndex = 0;
+    let tagformCloseIndex = 0;
 
     const emptySeparator = WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
+    const emptyTagformSeparator = TAGFORM_WRAPPER_OPEN_TAG + TAGFORM_WRAPPER_CLOSE_TAG;
 
     // `<pre>` content is never reformatted by prettier, so `cancelLevels`'s indent-shift assumption
     // (correct everywhere else) doesn't apply inside one - tracked separately since entering/leaving
@@ -872,7 +1010,11 @@ const stripWrappersAndSubstitute = async (
             ++wrapperCloseIndex;
             continue; // empty content-wrapper separator, collapsed onto one line
         }
-        if (trimmed === WRAPPER_OPEN_TAG) {
+        if (trimmed === emptyTagformSeparator) {
+            ++tagformCloseIndex;
+            continue;
+        }
+        if (trimmed === WRAPPER_OPEN_TAG || trimmed === TAGFORM_WRAPPER_OPEN_TAG) {
             stack.push('content');
             continue;
         }
@@ -893,17 +1035,114 @@ const stripWrappersAndSubstitute = async (
                 continue;
             }
             // A genuine `</colgroup>` - fall through and keep it.
+        } else if (trimmed === TAGFORM_WRAPPER_CLOSE_TAG) {
+            const isOurs = tagformCloseIsOurs[tagformCloseIndex++] ?? false;
+            if (isOurs) {
+                stack.pop();
+                continue;
+            }
+            // A genuine `</bdi>` - fall through and keep it.
         } else if (trimmed === CONTENT_INNER_CLOSE_TAG) {
             stack.pop();
             continue;
         }
 
+        // Captured *before* any glued-in-place close tag below pops the stack: this line's own indent
+        // was produced while whatever wrapper is closing here was still open, so it needs canceling by
+        // the depth at the *start* of this line, not by whatever's left once this line's own closes have
+        // been accounted for (which only matters for lines that come after this one). Only counts
+        // `'marker'`/`'inner'`, which are pure scaffolding depth with no semantic meaning, so always
+        // wrong and always canceled; `'content'` (from `WRAPPER_OPEN_TAG`/`TAGFORM_WRAPPER_OPEN_TAG`) is
+        // real, wanted nesting depth for an *ordinary* content line and is deliberately excluded here -
+        // `extraCancelThisLine` below handles the one case where it still needs canceling: this line
+        // specifically, when a `'content'` wrapper's own close ends up glued to real content that
+        // belongs *outside* it.
+        const cancelLevels = stack.filter((entry) => entry === 'marker' || entry === 'inner').length;
+        // Bumped once per `'content'`-role close resolved glued-in-place below (never for the ordinary
+        // own-line case, which is skipped via `continue` before reaching here) - real trailing content on
+        // this same line sits *after* that wrapper closes, so its depth needs to be canceled specifically
+        // for this line, even though `'content'` is otherwise never in `cancelLevels`'s filter.
+        let extraCancelThisLine = 0;
+
         // Unlike the wrappers above, `<address data-mojo-inner>` can collapse onto its content's line -
         // strip its tag text in place instead of touching the stack.
         let content = trimmed;
+        // Tracks whether any scaffolding tag below got stripped glued-in-place rather than removed as a
+        // whole line, so trailing whitespace *only* left over from that removal - never from real
+        // content, since `content` starts from an already-trimmed `line` - can be cleaned up afterward.
+        let strippedGluedScaffolding = false;
         if (content.includes(CONTENT_INNER_OPEN_TAG) || content.includes(CONTENT_INNER_CLOSE_TAG)) {
             content = content.split(CONTENT_INNER_OPEN_TAG).join('').split(CONTENT_INNER_CLOSE_TAG).join('');
+            strippedGluedScaffolding = true;
         }
+        // `WRAPPER_OPEN_TAG`/`WRAPPER_CLOSE_TAG` are used two different ways: as a real content wrapper
+        // (pushed/popped on `stack` as `'content'`, from `flush()`) and as a self-contained
+        // "line-break anchor" pair, always emitted glued directly together with nothing between them and
+        // never pushed onto `stack` at all (`emptySeparator`, `withBackslashContinuationAnchors`). Both
+        // normally stay on their own exact line, so neither ever needs a glued fallback - but nesting one
+        // inside a `TAGFORM_WRAPPER_OPEN_TAG` can still glue either shape to something else via the same
+        // cascading mid-tag-split quirk handled below: `<bdi>`'s own splitting can pull whatever sat right
+        // before its closing boundary along with it. The anchor-pair shape is checked and stripped first,
+        // as a unit, advancing `wrapperCloseIndex` to stay in sync with `classifyWrapperCloses`'s
+        // document-order count but never touching `stack` - it was never pushed there to begin with, so
+        // popping it would corrupt tracking for whatever real wrapper actually is open. Only a *lone*
+        // close left over after that - the real content-wrapper case, whose matching open genuinely was
+        // pushed as `'content'` - still pops the stack, exactly as the own-line case above does, and (per
+        // `extraCancelThisLine` above) bumps this line's own cancellation too.
+        if (content.includes(emptySeparator)) {
+            const pieces = content.split(emptySeparator);
+            wrapperCloseIndex += pieces.length - 1;
+            content = pieces.join('');
+            strippedGluedScaffolding = true;
+        }
+        // Skipped when this whole (trimmed) line was already exactly `WRAPPER_CLOSE_TAG` - the exact-match
+        // check above already classified and consumed that single occurrence (falling through, since it
+        // was genuine, to reach the ordinary content push below); re-matching the same text here would
+        // classify and consume a second, unrelated occurrence against the wrong index, corrupting both
+        // this line's own content and `stack` for every line after it.
+        if (trimmed !== WRAPPER_CLOSE_TAG && content.includes(WRAPPER_CLOSE_TAG)) {
+            content = content.split(WRAPPER_CLOSE_TAG).reduce((acc, piece, i) => {
+                if (i === 0) return piece;
+                const isOurs = wrapperCloseIsOurs[wrapperCloseIndex++] ?? false;
+                if (isOurs) {
+                    if (stack.pop() === 'content') ++extraCancelThisLine;
+                }
+                return `${acc}${isOurs ? '' : WRAPPER_CLOSE_TAG}${piece}`;
+            }, '');
+            strippedGluedScaffolding = true;
+        }
+        // `<bdi data-mojo-tagform-wrapper>` can likewise collapse onto its content's line - the whole
+        // point of using it instead of `WRAPPER_OPEN_TAG`. Its open tag is safe to strip unconditionally
+        // (a real author-written `<bdi>` never coincidentally carries this exact attribute); its close
+        // tag can't carry a disambiguating attribute, so each occurrence found here is checked, in the
+        // same document order `classifyTagformWrapperCloses` scanned in, against `tagformCloseIsOurs` -
+        // the same classification the own-line case above uses. `<bdi>` never pushes onto `stack` at all
+        // (its content just reflows ordinarily, no cancellation needed for that), but its own depth still
+        // needs canceling on this specific line - *unless* this same line also has `<bdi>`'s own open tag
+        // (captured before stripping it just below), meaning the whole thing collapsed onto one line and
+        // never actually contributed any extra depth to cancel in the first place.
+        const hadTagformOpenOnThisLine = content.includes(TAGFORM_WRAPPER_OPEN_TAG);
+        if (hadTagformOpenOnThisLine) {
+            content = content.split(TAGFORM_WRAPPER_OPEN_TAG).join('');
+            strippedGluedScaffolding = true;
+        }
+        // Same reasoning as the `WRAPPER_CLOSE_TAG` guard above - a line that was exactly
+        // `TAGFORM_WRAPPER_CLOSE_TAG` was already classified and consumed by the exact-match check.
+        if (trimmed !== TAGFORM_WRAPPER_CLOSE_TAG && content.includes(TAGFORM_WRAPPER_CLOSE_TAG)) {
+            content = content.split(TAGFORM_WRAPPER_CLOSE_TAG).reduce((acc, piece, i) => {
+                if (i === 0) return piece;
+                const isOurs = tagformCloseIsOurs[tagformCloseIndex++] ?? false;
+                if (isOurs && !hadTagformOpenOnThisLine) ++extraCancelThisLine;
+                return `${acc}${isOurs ? '' : TAGFORM_WRAPPER_CLOSE_TAG}${piece}`;
+            }, '');
+            strippedGluedScaffolding = true;
+        }
+        // Two adjacent scaffolding tags stripped glued-in-place (e.g. `WRAPPER_CLOSE_TAG` immediately
+        // followed by `TAGFORM_WRAPPER_CLOSE_TAG`, both removed above) can leave behind whatever real
+        // whitespace originally separated *them* - not real content, since neither tag itself ever
+        // renders anything, so collapsing it the same way HTML would collapse any other redundant
+        // whitespace run is safe.
+        if (strippedGluedScaffolding) content = content.replace(/ {2,}/g, ' ').trim();
         // A glued backslash whose line stayed glued (short enough) - restore the literal `\` in place.
         if (content.includes(GLUED_BACKSLASH_SENTINEL)) {
             content = content.split(GLUED_BACKSLASH_SENTINEL).join('\\');
@@ -932,12 +1171,14 @@ const stripWrappersAndSubstitute = async (
         }
 
         // Each open 'inner'/'marker' wrapper added one indent level to cancel; an own-line marker nests
-        // both at once.
-        const cancelLevels = stack.filter((entry) => entry === 'marker' || entry === 'inner').length;
+        // both at once (`cancelLevels` captured above, before this line's own glued closes) - plus
+        // `extraCancelThisLine`, for a `'content'`-role wrapper whose own close resolved glued-in-place
+        // on this same line.
         let indent = line.slice(0, line.length - line.trimStart().length);
+        const totalCancelLevels = cancelLevels + extraCancelThisLine;
         // One `indentUnit` per level, not per character - with `useTabs`, one tab is one level
         // regardless of `tabWidth`.
-        for (let i = 0; i < cancelLevels && indent.startsWith(indentUnit); ++i)
+        for (let i = 0; i < totalCancelLevels && indent.startsWith(indentUnit); ++i)
             indent = indent.slice(indentUnit.length);
 
         // A pure-Perl region (see `registerRegion`/`flattenNode`): every returned line is symmetric -
@@ -967,6 +1208,13 @@ const stripWrappersAndSubstitute = async (
                 continue;
             }
         }
+
+        // A line that was nothing but glued-together scaffolding tags (e.g. an empty `WRAPPER_CLOSE_TAG`
+        // fused with `TAGFORM_WRAPPER_CLOSE_TAG` by the mid-tag-split merge above) strips down to nothing
+        // real at all - unlike the exact-own-line `emptySeparator`/`emptyTagformSeparator` cases above,
+        // this shape only reveals itself after the glued-fallback stripping runs, so it can't `continue`
+        // that early; skipped here instead, the same way, rather than emitting a spurious blank line.
+        if (strippedGluedScaffolding && content === '') continue;
 
         // Everything up to the matching `</pre>` is verbatim content; this line itself still gets normal
         // indent handling.

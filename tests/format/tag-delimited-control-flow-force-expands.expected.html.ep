@@ -1,0 +1,3 @@
+<% if ($showThis) { %>
+    this is shown
+<% } =%>

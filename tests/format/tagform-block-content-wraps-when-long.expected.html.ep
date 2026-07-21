@@ -1,0 +1,12 @@
+<div>
+    <label
+        for="local_sets"
+        class="col-form-label-sm"
+        data-attribute-with-long-name="to make this not collapse"
+    >
+        Add problems to <b>Target Set:</b>
+    </label>
+    <%= label_for 'local_sets', class => 'col-form-label-sm', begin =%>
+        Add problems to <b>Target Set:</b>
+    <% end =%>
+</div>
