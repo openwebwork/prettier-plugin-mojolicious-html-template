@@ -5,8 +5,7 @@
 		<div class="alert alert-primary card p-2 mb-2" role="alert">
 			<em>
 				<%= maketext(
-					'This set has a set-level proctor password to authorize logins. Enter the password below.')
-				=%>
+					'This set has a set-level proctor password to authorize logins. Enter the password below.') =%>
 			</em>
 		</div>
 	% }

@@ -28,6 +28,5 @@
             user_id           => config->{userId},
             problem_style_url => url_for('remote/problem.css'),
             problem_url       => url_for('remote/problem.js')
-        }
-    =%>
+        } =%>
 </div>

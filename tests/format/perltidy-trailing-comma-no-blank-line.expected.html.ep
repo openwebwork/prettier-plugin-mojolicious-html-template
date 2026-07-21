@@ -1,5 +1,4 @@
 <%= link_to maketext( $formTitles->{$actionID} ) =>
 	"#$actionID",
 	class           => "nav-link action-link",
-	'aria-selected' => $active ? 'true' : 'false',
-=%>
+	'aria-selected' => $active ? 'true' : 'false', =%>

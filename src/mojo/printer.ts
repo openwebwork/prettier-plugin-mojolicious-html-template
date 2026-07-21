@@ -739,20 +739,13 @@ const buildReformattedDoc = async (
     // already landing exactly at `depth` - is kept as produced instead.
     const stripDepth = insidePre ? 0 : depth;
     const lastLine = perltidyLines[perltidyLines.length - 1];
-    // "Back at base depth" - a real closer, not a deeper continuation line - is judged from the
-    // *unstripped* indent either way, since `firstLineIndent` is also unstripped.
-    const lastLineIndent = /^\s*/.exec(lastLine)?.[0] ?? '';
     const middleParts = perltidyLines.slice(1, -1).map((line) => stripDepthPrefix(line, indentUnit, stripDepth));
     const strippedLastLine = stripDepthPrefix(lastLine, indentUnit, stripDepth);
 
-    // The closing delimiter glues onto the last line when it's back at the marker's own depth, the same
-    // way prettier itself collapses a multi-line tag's closing `>` onto its last attribute line when
-    // there's nothing deeper to close over; otherwise it gets its own line - unless `mustGlueSuffix`
-    // forces gluing regardless of depth.
-    const parts =
-        mustGlueSuffix || lastLineIndent === firstLineIndent
-            ? [firstPart, ...middleParts, suffix ? `${strippedLastLine} ${suffix}` : strippedLastLine]
-            : [firstPart, ...middleParts, strippedLastLine, suffix];
+    // The closing delimiter always glues onto the last content line - matching Mojolicious template
+    // convention (and required outright for a `begin` marker, see `mustGlueSuffix`) rather than
+    // prettier's own multi-line-tag convention of giving it its own line.
+    const parts = [firstPart, ...middleParts, suffix ? `${strippedLastLine} ${suffix}` : strippedLastLine];
 
     return linesToDoc(parts, !insidePre);
 };

@@ -6,8 +6,7 @@
 % unless (defined $c->{globalData}) {
     <p>
         <%= maketext(
-            q{You don't have any Achievement data associated to you!})
-        =%>
+            q{You don't have any Achievement data associated to you!}) =%>
     </p>
     % last;
 % }

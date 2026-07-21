@@ -11,5 +11,4 @@
 <%= javascript getAssetURL( $ce, 'js/TagWidget/tagwidget.js' ),
 	id    => 'tag-widget-script',
 	defer => undef,
-	data  => { taxonomy => "$ce->{webworkURLs}{htdocs}/DATA/tagging-taxonomy.json" }
-=%>
+	data  => { taxonomy => "$ce->{webworkURLs}{htdocs}/DATA/tagging-taxonomy.json" } =%>
