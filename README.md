@@ -1,7 +1,7 @@
 # prettier-mojolicious-html-template
 
 A [Prettier](https://prettier.io/) plugin for formatting [Mojolicious](https://mojolicious.org/)
-`.html.ep` templates (and plain `Mojo::Template` `.mt` files).
+`.html.ep` and `.html.epl` templates.
 
 Mojolicious templates mix HTML with embedded Perl, using `<% %>`/`<%= %>`/`<%== %>` tags and `%`-prefixed
 control lines. Prettier has no native way to format that mixture. This plugin parses the Mojo template
@@ -18,8 +18,21 @@ consistently formatted, with the HTML and the Perl each laid out by the tool tha
   inside `<pre>`.
 - Understands Mojolicious's block syntax (`% ... {` / `% }`, `begin`/`end`) well enough to indent nested
   control flow to match the surrounding HTML depth.
+- Lets a `<%`-delimited Block's content lay out on one line when it fits, or wrap normally when it
+  doesn't - but _how_ that decision gets made differs by what the Block wraps, matching each tool's own
+  convention: a `begin`/`end` Block wraps ordinary markup, so it collapses whenever it fits, the same way
+  Prettier lays out any HTML element, regardless of how the source was originally written. A `{`/`}`
+  control-flow Block wraps genuine Perl, so instead it preserves whichever the author already wrote -
+  `if (...) { ... }` on one line stays one line if it still fits; the same code across several lines stays
+  several lines even if it would now fit joined - matching how `perltidy` treats real Perl. A bare
+  `%`-opened Block always stays multi-line either way, since Mojolicious requires each bare `%` control
+  line to start its own physical line.
 - Collapses runs of consecutive blank `%` lines down to one, matching how Prettier and `perltidy` both
   collapse blank lines elsewhere.
+- Normalizes void HTML elements (`<br>`, `<input>`, `<img>`, etc.) to the bare, non-self-closing form, and
+  expands any non-void element that ends up self-closing into a real open/close pair - a non-void
+  element's self-closing slash doesn't actually close it in HTML5, so Prettier's own default of preserving
+  it is misleading output.
 - Picks up an existing `.perltidyrc` (searched for starting from the template's own directory and walking
   upward) so embedded Perl follows the same style as the rest of a project's Perl code.
 - Idempotent: formatting an already-formatted file produces no changes.
@@ -45,8 +58,8 @@ Add the plugin to your Prettier configuration. In `.prettierrc`:
 }
 ```
 
-The plugin registers itself for files ending in `.html.ep` or `.mt`, so no `overrides`/`parser` setting is
-normally needed - just run Prettier as usual:
+The plugin registers itself for files ending in `.html.ep` or `.html.epl`, so no `overrides`/`parser`
+setting is normally needed - just run Prettier as usual:
 
 ```sh
 npx prettier --write "templates/**/*.html.ep"
@@ -61,13 +74,24 @@ explicitly.
 
 ### Combining with other plugins
 
-Mojolicious templates often also want
+This plugin normalizes void HTML elements itself (see Features above), so
 [`@awmottaz/prettier-plugin-void-html`](https://www.npmjs.com/package/@awmottaz/prettier-plugin-void-html)
-for self-closing void HTML elements. Both can be listed together:
+isn't needed for `.html.ep`/`.html.epl` files and **shouldn't be loaded globally alongside this one** - both
+plugins register their own printer for Prettier's `html` AST format under the same name, and this plugin
+relies internally on that same format to lay out the HTML surrounding each Mojo marker. Loading both means
+the _other_ plugin's printer - not Prettier's own - ends up handling that internal step too, and its own
+Doc-shape assumptions don't anticipate a void element sitting glued against a marker placeholder rather
+than a real HTML sibling, corrupting the output.
+
+If a project also has genuine `.html` files that want `@awmottaz/prettier-plugin-void-html`, scope each
+plugin to its own file pattern with `overrides` instead of listing both globally:
 
 ```json
 {
-    "plugins": ["@awmottaz/prettier-plugin-void-html", "prettier-mojolicious-html-template"]
+    "overrides": [
+        { "files": "*.html", "options": { "plugins": ["@awmottaz/prettier-plugin-void-html"] } },
+        { "files": "*.html.ep", "options": { "plugins": ["prettier-mojolicious-html-template"] } }
+    ]
 }
 ```
 
@@ -109,8 +133,22 @@ becomes
 ```html+ep
 <%= tag 'div',
     id    => 'foo',
-    class => 'bar',
-=%>
+    class => 'bar', =%>
+```
+
+A `<%`-delimited control-flow Block preserves whichever line count the author wrote, the same way
+`perltidy` treats real Perl - written on one line, it stays one line as long as it still fits:
+
+```html+ep
+<% if ($showThis) { %>this is shown<% } %>
+```
+
+but written across several lines, it stays that way even though it would now fit joined:
+
+```html+ep
+<% if ($showThis) { %>
+    this is shown
+<% } %>
 ```
 
 ## Requirements

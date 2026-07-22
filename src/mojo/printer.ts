@@ -18,6 +18,9 @@ const NO_BREAK_SENTINEL = String.fromCharCode(0xe004);
 const PRE_GLUE_SENTINEL = String.fromCharCode(0xe005);
 // Marks a `PlainMarker` glued to a real HTML tag's own `>` on its preceding side.
 const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
+// Brackets a masked-out Mojo marker span during `normalizeVoidElements` - see there for why.
+const MASKED_MARKER_OPEN = String.fromCharCode(0xe007);
+const MASKED_MARKER_CLOSE = String.fromCharCode(0xe008);
 
 // `<colgroup data-mojo-wrapper>`: prettier's HTML printer only forces an element's children onto their
 // own lines unconditionally for a hardcoded set of real tags - a made-up tag would just collapse when
@@ -27,12 +30,14 @@ const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 const WRAPPER_OPEN_TAG = '<colgroup data-mojo-wrapper>';
 const WRAPPER_CLOSE_TAG = '</colgroup>';
 
-// A wrapper for a tag-form Block's own content (`<%= ..., begin =%> ... <% end =%>`): unlike a Perl
-// control-flow Block, whose content must never collapse even when short (the reason `WRAPPER_OPEN_TAG`
-// exists), a tag-form Block's content is ordinary markup and should lay out like a real HTML element's -
-// collapsing when it fits, even glued zero-gap to the Block's own markers on both sides. A block-display
-// tag can't do that (always forced onto its own line regardless of width); `<bdi>` is real, inline, and
-// collides least with genuine markup.
+// A wrapper for a `<%`-delimited Block's own content (`<%= ..., begin =%> ... <% end =%>`, or
+// `<% if (...) { %> ... <% } %>`): unlike a *bare*-`%`-opened Block, whose content must never collapse
+// even when short (the reason `WRAPPER_OPEN_TAG` exists - Mojolicious requires each bare `%` control
+// line to start its own physical line), a `<%`-delimited Block has no such restriction and should lay
+// out like a real HTML element's - collapsing when it fits, even glued zero-gap to the Block's own
+// markers on both sides, the same way `perltidy` collapses real Perl control-flow when it fits. A
+// block-display tag can't do that (always forced onto its own line regardless of width); `<bdi>` is
+// real, inline, and collides least with genuine markup.
 const TAGFORM_WRAPPER_OPEN_TAG = '<bdi data-mojo-tagform-wrapper>';
 const TAGFORM_WRAPPER_CLOSE_TAG = '</bdi>';
 
@@ -78,11 +83,32 @@ const splitMarkerDelimiters = (text: string): { prefix: string; body: string; su
 
 // A Block's `OpenMarker` opens it either via a trailing `{` (Perl control-flow: `if`/`unless`/`for`/...)
 // or a trailing `begin` keyword (Mojolicious's block-capture syntax) - `classify` in tokens.ts treats
-// both identically at the grammar level, so the delimiter alone (`<%` vs bare `%`) doesn't distinguish
-// them: `<% if ($error) { =%>` starts with `<%` like a real tag-form marker, but is genuine control-flow
-// that must stay forced multi-line, same as the bare `% if (...) {` shorthand.
+// both identically at the grammar level. What actually forces a Block onto its own physical line is
+// Mojolicious's own syntax rule for a *bare* `%` control line (must start its own line or fail to parse),
+// not control-flow-vs-value-capture - a `<%`-delimited marker has no such restriction either way.
+const usesTagDelimiter = (openMarkerText: string): boolean => openMarkerText.startsWith('<%');
+
+// Whether a Block's `OpenMarker` ends specifically in the `begin` keyword (Mojolicious's block-capture
+// syntax, wrapping ordinary markup as a value) rather than a trailing `{` (genuine Perl control-flow).
 const isTagFormOpenMarker = (openMarkerText: string): boolean =>
     /\bbegin\s*$/.test(splitMarkerDelimiters(openMarkerText)?.body ?? '');
+
+// A `<%`-delimited Block is eligible for the collapsible `<bdi>` wrapper (see `visitNode`), but which
+// *philosophy* governs when it actually collapses differs by what it wraps. A `begin`/`end` Block wraps
+// ordinary markup, which should lay out like prettier lays out any real HTML element - collapse whenever
+// it fits, regardless of how the author originally wrote it. A `{`/`}` control-flow Block wraps genuine
+// Perl, which `perltidy` treats differently: it *preserves the author's own line-count choice* rather
+// than always collapsing when possible - `if (...) { ... }` written on one line stays one line if it
+// still fits, but the same code written across several lines stays several lines even if it would now
+// fit joined. Matched here by checking the Block's own source text (which, for a `Block`, always spans
+// from `OpenMarker` through `CloseMarker` inclusive) for any newline at all - including one hidden behind
+// a `\`-continuation, which suppresses a newline in the *rendered* output but still leaves a real `\n` in
+// the source. A bare-`%`-opened Block is never eligible either way (see `needsOwnLineAnchor`).
+const isCollapsibleBlock = (node: MojoNode): boolean => {
+    const openMarkerText = node.children[0]?.text ?? '';
+    if (!usesTagDelimiter(openMarkerText)) return false;
+    return isTagFormOpenMarker(openMarkerText) || !node.text.includes('\n');
+};
 
 // A bare `%` line with real Perl content - not tag-form, not `%=`/`%==`, and not a content-free
 // `%`-alone line (see `isBlankPercentLine`).
@@ -154,11 +180,11 @@ const isPureBlock = (node: MojoNode): boolean =>
 const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(node) || isPureBlock(node);
 
 // A node whose own-line placement relies on the whitespace-anchor mechanism in `visitSequence` below
-// rather than a real wrapper element: a bare `%` line, or a Block genuinely requiring one - a `%`
-// control line must start its own physical line or Mojolicious fails to parse it. Not a tag-form Block
-// (`<%= ..., begin =%>`), which has no such restriction and should collapse freely.
+// rather than a real wrapper element: a bare `%` line, or a Block ineligible for the collapsible
+// wrapper (see `isCollapsibleBlock`) - a `%` control line must start its own physical line or
+// Mojolicious fails to parse it.
 const needsOwnLineAnchor = (node: MojoNode): boolean =>
-    (node.type === 'Block' && !isTagFormOpenMarker(node.children[0]?.text ?? '')) || isBarePercentLine(node);
+    (node.type === 'Block' && !isCollapsibleBlock(node)) || isBarePercentLine(node);
 
 // Mojo::Template suppresses a text line's trailing newline when it ends in `\`, joining it directly to
 // what follows in the rendered output. A bare `\<newline>` inside a `Text` node means nothing to HTML,
@@ -472,13 +498,9 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
 
     const visitNode = (node: MojoNode) => {
         if (node.type === 'Block') {
-            // A Block opened by a tag-form marker (`<%= ..., begin =%>`) wraps ordinary markup, not Perl
-            // control-flow - `Block.children[0]` is always the OpenMarker, per the grammar
-            // (`Block { OpenMarker item* (MidMarker item*)* CloseMarker }`). See `isTagFormOpenMarker` for
-            // why this can't just check the delimiter style.
-            const isTagForm = isTagFormOpenMarker(node.children[0]?.text ?? '');
-            const openTag = isTagForm ? TAGFORM_WRAPPER_OPEN_TAG : WRAPPER_OPEN_TAG;
-            const closeTag = isTagForm ? TAGFORM_WRAPPER_CLOSE_TAG : WRAPPER_CLOSE_TAG;
+            const collapsible = isCollapsibleBlock(node);
+            const openTag = collapsible ? TAGFORM_WRAPPER_OPEN_TAG : WRAPPER_OPEN_TAG;
+            const closeTag = collapsible ? TAGFORM_WRAPPER_CLOSE_TAG : WRAPPER_CLOSE_TAG;
 
             let group: MojoNode[] = [];
             const flush = () => {
@@ -501,7 +523,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                 // nested Blocks and inflates prettier's own fits/width computation beyond the real final
                 // depth - only pay for it when actually needed, and only for `WRAPPER_OPEN_TAG`, whose
                 // mid-tag-split quirk it exists to work around; `TAGFORM_WRAPPER_OPEN_TAG` doesn't have it.
-                const needsInner = !isTagForm && needsGluedTagProtection(group);
+                const needsInner = !collapsible && needsGluedTagProtection(group);
                 skeleton += openTag + (needsInner ? CONTENT_INNER_OPEN_TAG : '');
                 visitSequence(group);
                 skeleton += (needsInner ? CONTENT_INNER_CLOSE_TAG : '') + closeTag;
@@ -898,6 +920,68 @@ const spliceMarkerDocs = (htmlDoc: Doc, markerDocs: Map<number, Doc>): Doc =>
         return parts.length === 1 ? parts[0] : parts;
     });
 
+// The HTML void elements (per the WHATWG spec) - never have a closing tag or content.
+const VOID_ELEMENTS = new Set([
+    'area',
+    'base',
+    'br',
+    'col',
+    'embed',
+    'hr',
+    'img',
+    'input',
+    'link',
+    'meta',
+    'source',
+    'track',
+    'wbr'
+]);
+
+// Prettier's own HTML printer always self-closes a void element (`<col ... />`) and always preserves
+// self-closing syntax on a non-void one if the source had it (`<div ... />`) - the opposite of what this
+// project's real users want (bare `<col ...>`, and a real `<div ...></div>` pair, since a non-void
+// element's `/>` doesn't actually self-close in HTML5; browsers silently ignore the slash). Previously
+// handled by loading a second prettier plugin (`@awmottaz/prettier-plugin-void-html`) alongside this one,
+// but that plugin's own printer overrides prettier's HTML printer with a Doc-shape assumption (pop the
+// last item off a void element's printed Doc, assuming it's a synthesized closing tag) that breaks when
+// the "next sibling" it also inspects is a marker placeholder rather than a real HTML element - a
+// combination that was unreachable before this project let a Block's content collapse (see
+// `isCollapsibleBlock`), and is now common. Reimplemented here instead, as a plain text transform on the
+// fully-assembled output rather than a Doc-tree hook: normalizing already-formatted, well-structured HTML
+// text is far lower-risk than intercepting prettier's own print pipeline.
+const SELF_CLOSING_TAG_RE = /<([a-zA-Z][\w-]*)((?:\s[^<>]*)?)\s*\/>/g;
+
+// This runs on the fully-substituted output, where a marker's own real Perl text is indistinguishable
+// from surrounding HTML except by its own `<% %>`/bare-`%` syntax - and that Perl text can legitimately
+// contain a string literal that looks exactly like a self-closing tag (e.g. `"<br/>"`), which must never
+// be rewritten. Every marker span - tag-form or a whole bare-`%`-prefixed line - is masked out behind a
+// short, uniquely-numbered placeholder before the regex above runs, then restored verbatim afterward; the
+// placeholder carries no `<`/`>` of its own, so a void element with a marker embedded in its own
+// attribute list (`<col class="<%= $class %>" />`) still matches as one contiguous tag.
+const MOJO_MARKER_SPAN_RE = /<%[\s\S]*?%>|^[ \t]*%.*$/gm;
+const normalizeVoidElements = (text: string): string => {
+    const spans: string[] = [];
+    const masked = text.replace(MOJO_MARKER_SPAN_RE, (match) => {
+        const id = (spans.push(match) - 1).toString();
+        return `${MASKED_MARKER_OPEN}${id}${MASKED_MARKER_CLOSE}`;
+    });
+    const transformed = masked.replace(SELF_CLOSING_TAG_RE, (_match, tagName: string, attrs: string) => {
+        // `attrs`'s own pattern greedily swallows the whitespace the outer regex left room for before
+        // `/>`, so it always needs trimming here rather than relying on that outer `\s*` to have caught
+        // it - but only when the tag stayed on one line (a single trailing space before `/>`). When the
+        // attribute list wrapped, prettier already put the `/` on its own line indented to match the
+        // opening tag - that trailing newline-plus-indent is also trailing whitespace, so it must be
+        // detected and left alone here, or the closing `>` lands at column zero instead of matching the
+        // opening tag like every other wrapped tag in this project's output.
+        const trimmedAttrs = /\n[ \t]*$/.test(attrs) ? attrs : attrs.replace(/[ \t]+$/, '');
+        return VOID_ELEMENTS.has(tagName.toLowerCase())
+            ? `<${tagName}${trimmedAttrs}>`
+            : `<${tagName}${trimmedAttrs}></${tagName}>`;
+    });
+    const maskedRe = new RegExp(`${MASKED_MARKER_OPEN}(\\d+)${MASKED_MARKER_CLOSE}`, 'g');
+    return transformed.replace(maskedRe, (_match, id: string) => spans[Number(id)]);
+};
+
 const stripWrappersAndSubstitute = async (
     formatted: string,
     markers: MarkerInfo[],
@@ -1232,6 +1316,6 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
         const { formatted: formatted2 } = doc.printer.printDocToString(splicedDoc, printOpts);
 
         const result = await stripWrappersAndSubstitute(formatted2, markers, indentUnit, perltidyContext);
-        return `${result}\n`;
+        return `${normalizeVoidElements(result)}\n`;
     };
 };

@@ -1,0 +1,5 @@
+<div>
+	<div>
+		<input type="text" class="form-control" id="search-box" aria-label="Search the documentation" placeholder="Search the documentation">
+	</div>
+</div>

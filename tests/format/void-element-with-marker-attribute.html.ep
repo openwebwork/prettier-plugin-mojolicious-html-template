@@ -1,0 +1,5 @@
+<table>
+	<colgroup>
+		<col class="<%= $class %>" />
+	</colgroup>
+</table>

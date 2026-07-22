@@ -7,8 +7,8 @@ export const languages: SupportLanguage[] = [
     {
         name: 'MojoliciousHTMLTemplate',
         parsers: ['mojolicious-html-template'],
-        extensions: ['.html.ep', '.mt'],
-        vscodeLanguageIds: ['html.ep']
+        extensions: ['.html.ep', '.html.epl'],
+        vscodeLanguageIds: ['html.ep', 'html.epl']
     }
 ];
 

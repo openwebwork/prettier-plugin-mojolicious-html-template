@@ -1,0 +1,5 @@
+<div>
+	<% if ($showThis) { %>
+		This is a fairly long sentence that should not fit on one collapsed line with its markers.
+	<% } %>
+</div>
