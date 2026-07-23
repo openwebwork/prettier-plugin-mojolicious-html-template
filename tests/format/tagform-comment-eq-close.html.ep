@@ -1,0 +1,3 @@
+<p>Before</p>
+<%# comment with equal close =%>
+<p>After</p>

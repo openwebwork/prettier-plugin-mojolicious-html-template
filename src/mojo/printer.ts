@@ -66,13 +66,20 @@ interface MarkerInfo {
 }
 
 // Splits a reformat-eligible `PlainMarker`'s text into its delimiter and body, or `undefined` for a
-// shape this phase doesn't handle.
+// shape this phase doesn't handle. A `<%# comment %>` tag (a genuine Mojolicious comment tag, not
+// merely a `<%`/`<%=`/`<%==` marker whose Perl content happens to contain a `#`) is excluded: unlike
+// ordinary Perl content, its body is never actually evaluated, so it can legitimately span several
+// physical lines without each one starting with its own `#`. Handing that to `perltidy` as Perl would
+// misparse every line after the first as real code. Left as raw passthrough instead, the same as any
+// other marker `perltidy` can't safely reformat.
 const splitMarkerDelimiters = (text: string): { prefix: string; body: string; suffix: string } | undefined => {
     if (text.startsWith('<%')) {
         const prefix = text.startsWith('<%==') ? '<%==' : text.startsWith('<%=') ? '<%=' : '<%';
         const rest = text.slice(prefix.length);
         const suffix = rest.endsWith('=%>') ? '=%>' : rest.endsWith('%>') ? '%>' : undefined;
-        return suffix ? { prefix, body: rest.slice(0, rest.length - suffix.length).trim(), suffix } : undefined;
+        if (!suffix) return undefined;
+        const body = rest.slice(0, rest.length - suffix.length).trim();
+        return prefix === '<%' && body.startsWith('#') ? undefined : { prefix, body, suffix };
     }
     if (text.startsWith('%=')) {
         const prefix = text.startsWith('%==') ? '%==' : '%=';

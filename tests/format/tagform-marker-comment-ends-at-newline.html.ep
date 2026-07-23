@@ -1,0 +1,4 @@
+<p>Before</p>
+<%= doSomething() # a trailing comment
+%>
+<p>After</p>

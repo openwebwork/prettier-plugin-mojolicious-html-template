@@ -69,9 +69,16 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
 
     const c = input.peek(offset);
     if (c === HASH && input.peek(offset - 1) !== DOLLAR) {
-        // `$#array` is Perl's "last index" sigil, not a comment.
+        // `$#array` is Perl's "last index" sigil, not a comment. Also stops at a tag's own closing
+        // `%>`, e.g. a whole-line comment tag (`<%# comment %>`), rather than only at a newline.
         let o = offset + 1;
-        while (input.peek(o) !== NEWLINE && input.peek(o) !== -1) ++o;
+        while (
+            input.peek(o) !== NEWLINE &&
+            input.peek(o) !== -1 &&
+            !(input.peek(o) === PERCENT && input.peek(o + 1) === GT)
+        ) {
+            ++o;
+        }
         return o;
     }
     if ((c === SINGLE_QUOTE || c === DOUBLE_QUOTE) && input.peek(offset - 1) !== BACKSLASH) {
