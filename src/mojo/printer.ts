@@ -121,34 +121,70 @@ const isBarePercentLine = (node: MojoNode): boolean =>
 // A `%`-alone line - this templating format's equivalent of a blank line between statements.
 const isBlankPercentLine = (node: MojoNode): boolean => node.type === 'PlainMarker' && node.text.trim() === '%';
 
-// Collapses a run of 2+ consecutive `isBlankPercentLine` siblings down to just the first, matching how
-// prettier and `perltidy` both collapse blank-line runs.
-const collapseBlankPercentRuns = (nodes: MojoNode[]): MojoNode[] => {
+// A Text node with nothing but whitespace in it - a run of one or more genuinely blank source lines.
+const isWhollyBlankText = (node: MojoNode): boolean => node.type === 'Text' && node.text.trim() === '';
+
+// One or more blank lines sitting at the very end/start of a Text node's text, past the one line
+// terminator that must stay to end/begin the adjacent real line. Used to fold a bordering Text node's
+// own blank-line edge into a `%`-run being collapsed - see `collapseBlankRuns`.
+const TRAILING_BLANK_LINES_RE = /\n([ \t]*\n)+$/;
+const LEADING_BLANK_LINES_RE = /^\n([ \t]*\n)+/;
+
+// Collapses a maximal run of blank-`%` lines and whitespace-only lines - including a bordering Text
+// node's own trailing/leading blank-line edge - down to a single blank-`%` line, matching how prettier
+// collapses a run of blank HTML lines down to one and preferring the `%` form the same way this plugin
+// already prefers it for a run of nothing but blank-`%` lines. A run with no blank-`%` line anywhere in
+// it is left untouched - prettier's own HTML printer already collapses that case correctly on its own.
+const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
+    const nodes = [...rawNodes];
+    const isRunMember = (node: MojoNode): boolean => isBlankPercentLine(node) || isWhollyBlankText(node);
     const result: MojoNode[] = [];
     let i = 0;
     while (i < nodes.length) {
         const node = nodes[i];
-        if (!isBlankPercentLine(node)) {
+        if (!isRunMember(node)) {
             result.push(node);
             ++i;
             continue;
         }
-        result.push(node);
         let j = i + 1;
-        // Skip further blank lines and their connecting whitespace, keeping the last connector seen.
-        let trailingConnector: MojoNode | undefined;
-        while (j < nodes.length) {
-            const next = nodes[j];
-            if (next.type === 'Text' && next.text.trim() === '') {
-                trailingConnector = next;
-                ++j;
-            } else if (isBlankPercentLine(next)) {
-                ++j;
-            } else {
-                break;
-            }
+        while (j < nodes.length && isRunMember(nodes[j])) ++j;
+        const run = nodes.slice(i, j);
+        const anchor = run.find(isBlankPercentLine);
+        if (!anchor) {
+            // Pure whitespace, no `%` anywhere in the run - leave it for prettier's own printer to
+            // collapse down to one blank line.
+            result.push(...run);
+            i = j;
+            continue;
         }
-        if (trailingConnector) result.push(trailingConnector);
+        // The run's own leading edge (everything up to `anchor`) is about to be dropped entirely. A real
+        // bordering Text node already outside the run (`prev`) always already carries the one real
+        // newline `anchor` needs - by construction (a blank `%` line always starts its own physical
+        // line), trimming its own trailing blank-line edge, if it has one, is all that's needed; when
+        // `prev` isn't a Text node at all (a Block, another marker, or nothing - the very first thing
+        // inside a Block's own wrapper tag, say), that one real newline was instead the run's own leading
+        // Text member, about to be dropped along with the rest of the run - replaced with a minimal
+        // stand-in instead, so `anchor` doesn't end up glued straight onto whatever precedes this
+        // sequence with no separator at all.
+        const prev = result.length > 0 ? result[result.length - 1] : undefined;
+        if (prev?.type === 'Text') {
+            if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
+                result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
+            }
+        } else if (run[0].type === 'Text') {
+            result.push({ ...run[0], text: '\n' });
+        }
+        result.push(anchor);
+        // Same reasoning, mirrored.
+        const next = j < nodes.length ? nodes[j] : undefined;
+        if (next?.type === 'Text') {
+            if (LEADING_BLANK_LINES_RE.test(next.text)) {
+                nodes[j] = { ...next, text: next.text.replace(LEADING_BLANK_LINES_RE, '\n') };
+            }
+        } else if (run[run.length - 1].type === 'Text') {
+            result.push({ ...run[run.length - 1], text: '\n' });
+        }
         i = j;
     }
     return result;
@@ -412,7 +448,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // Block's content too: `needsOwnLineAnchor` already returns `false` there specifically, so no separate
     // exception is needed - one would wrongly block a nested bare-`%` Block's own required anchor.
     const visitSequence = (rawNodes: MojoNode[], isTopLevel = false) => {
-        const nodes = collapseBlankPercentRuns(rawNodes);
+        const nodes = collapseBlankRuns(rawNodes);
         let i = 0;
         while (i < nodes.length) {
             // A region only ever starts at a real anchor, never a connector - otherwise a leading

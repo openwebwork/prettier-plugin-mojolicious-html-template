@@ -27,8 +27,9 @@ consistently formatted, with the HTML and the Perl each laid out by the tool tha
   several lines even if it would now fit joined - matching how `perltidy` treats real Perl. A bare
   `%`-opened Block always stays multi-line either way, since Mojolicious requires each bare `%` control
   line to start its own physical line.
-- Collapses runs of consecutive blank `%` lines down to one, matching how Prettier and `perltidy` both
-  collapse blank lines elsewhere.
+- Collapses a run of consecutive blank `%` lines and/or blank whitespace-only lines down to a single blank
+  `%` line, matching how Prettier collapses a run of blank HTML lines down to one and preferring the `%`
+  form whenever one appears anywhere in the run.
 - Normalizes void HTML elements (`<br>`, `<input>`, `<img>`, etc.) to the bare, non-self-closing form, and
   expands any non-void element that ends up self-closing into a real open/close pair - a non-void
   element's self-closing slash doesn't actually close it in HTML5, so Prettier's own default of preserving
