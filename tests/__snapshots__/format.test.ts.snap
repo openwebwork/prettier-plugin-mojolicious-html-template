@@ -1,0 +1,289 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`backslash-glued-opening-tag-merge.html.ep 1`] = `
+"
+<div>
+	<span class="input-group-text flex-grow-1">\\
+		<%== maketext('assignments and dates for <strong>one</strong> user') =%>\\
+	</span>
+</div>
+"
+`;
+
+exports[`backslash-glued-to-control-flow-open.html.ep 1`] = `
+"
+<div class="rpc_render_area">\\
+	<% if ($error) { =%>\\
+		<div class="alert alert-danger p-1 mb-0 fw-bold"><%= $error %></div>
+	<% } =%>\\
+</div>
+"
+`;
+
+exports[`backslash-line-continuation.html.ep 1`] = `
+"
+<p>
+	Some text\\
+	<% if ($x) { =%>
+		<%= $x %>\\
+	<% } =%>\\
+	More text after.
+</p>
+"
+`;
+
+exports[`basic-html.html.ep 1`] = `
+"
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Test Page</title>
+    </head>
+    <body>
+        <div class="container">
+            <p>Hello, world!</p>
+        </div>
+    </body>
+</html>
+"
+`;
+
+exports[`dollar-hash-array-sigil.html.ep 1`] = `
+"
+<div>
+	% my @foo;
+	% for (0 .. $#foo) {
+		<%= $foo[$_] %>
+	% }
+</div>
+"
+`;
+
+exports[`escaped-quote-in-regex.html.ep 1`] = `
+"
+% my $x = 'test';
+% $x =~ s/\\"//g;
+<div>hello</div>
+"
+`;
+
+exports[`inline-blocks.html.ep 1`] = `
+"
+<div class="greeting">
+    <p>Hello, <%= $name %>!</p>
+    <p><%== $rawHtml %></p>
+    <% my $count = scalar(@items); %>
+    <p>You have <%= $count %> items.</p>
+</div>
+"
+`;
+
+exports[`inline-multiline-marker-narrow-lines.html.ep 1`] = `
+"
+<div class="m-3 overflow-auto">
+	% if (@perlCriticViolations) {
+		<ul class="list-group">
+			% for (@perlCriticViolations) {
+				<li class="list-group-item">
+					<div><%= $_->to_string %></div>
+					<div>
+						See
+						<%= link_to(
+							'https://metacpan.org/pod',
+							target => '_blank',
+							data   => {
+								value1 => 1,
+								value2 => 2,
+								value3 => 3,
+								value4 => 4,
+								value5 => 5,
+								value6 => 6,
+								value7 => 7
+							}
+						) %>.
+					</div>
+				</li>
+			% }
+		</ul>
+	% }
+</div>
+"
+`;
+
+exports[`marker-glued-to-closing-tag-with-backslash.html.ep 1`] = `
+"
+<div class="row">
+	<pre class="PGCodeMirror m-0 h-100 p-3 border border-secondary overflow-scroll"><% =%>\\
+		<%= $_->{code} =%>\\
+	</pre><% =%>\\
+</div>
+"
+`;
+
+exports[`mojo-block-inside-p-tag.html.ep 1`] = `
+"
+<p>
+	Some text
+	% if ($x) {
+		<i>yes</i>
+	% } else {
+		<i>no</i>
+	% }
+</p>
+"
+`;
+
+exports[`nested-block-no-glue.html.ep 1`] = `
+"
+%= form_for current_route, method => 'POST', begin
+	% if (1) {
+		<div class="alert alert-primary card p-2 mb-2" role="alert">
+			<div><%= maketext(q{User's username is:}) %> <strong><%= param('effectiveUser') // '' %></strong></div>
+			<div>
+				<%= maketext(q{User's name is:}) %>
+				<strong><%= $c->{effectiveUser}->first_name %> <%= $c->{effectiveUser}->last_name %></strong>
+			</div>
+		</div>
+	% }
+% end
+"
+`;
+
+exports[`nested-control-lines.html.ep 1`] = `
+"
+<div class="outer">
+    % if ($case1) {
+        <h2>Case 1 Header</h2>
+        <div class="inner">Case 1 text.</div>
+    % } else {
+        <h2>Case 2 Header</h2>
+        <div class="inner">Case 2 text.</div>
+    % }
+</div>
+"
+`;
+
+exports[`output-sigil-begin-end.html.ep 1`] = `
+"
+<div>
+	<%= link_to $c->systemLink(url_for), class => 'btn', begin =%>
+		<i class="icon"></i>
+	<%= end %>
+</div>
+"
+`;
+
+exports[`percent-line-hash-in-string.html.ep 1`] = `
+"
+% my $x = "value#not-a-comment";
+% if ($x) {
+	<div>content</div>
+% }
+"
+`;
+
+exports[`percent-line-trailing-comment.html.ep 1`] = `
+"
+% if ($file) {    # Check that it is a text file
+	<div>content</div>
+% } elsif ($other) {
+	<span>other</span>
+% } else {
+	<p>none</p>
+% }
+"
+`;
+
+exports[`perltidy-semicolon-width-boundary.html.ep 1`] = `
+"
+<div class="container my-3">
+    <div class="input-group mb-3">
+        <%= text_field 'problem-seed' => config->{defaultProblemSeed}, class => 'form-control', id => 'problem-seed' =%>
+    </div>
+</div>
+"
+`;
+
+exports[`pre-glued-marker-opening.html.ep 1`] = `
+"
+<div class="row">
+	<pre class="PGCodeMirror m-0 h-100 p-3 border border-secondary overflow-scroll"><% =%>\\
+		<%= $_->{code} =%>\\
+	</pre>
+</div>
+"
+`;
+
+exports[`pre-tag-preserves-indentation.html.ep 1`] = `
+"
+<ul>
+	% if (defined $x) {
+		<li>
+			<pre style="display:inline"><% =%>\\
+				<code><%= $x->[0] %>: <%= $x->[1] %></code><% =%>\\
+			</pre>
+		</li>
+	% }
+</ul>
+"
+`;
+
+exports[`script-marker.html.ep 1`] = `
+"
+<script>
+	const webworkConfig = <%== $c->webwork_js_config($showMathJaxErrors) %>;
+	const total = <%= $count %>;
+</script>
+"
+`;
+
+exports[`tag-delimited-control-flow-collapses-when-short.html.ep 1`] = `
+"
+<% if ($showThis) { %>this is shown<% } =%>
+"
+`;
+
+exports[`tag-delimited-for-loop-collapses-when-short.html.ep 1`] = `
+"
+<% for my $var (@list) { %><%= $var %><% } %>
+"
+`;
+
+exports[`tagform-comment.html.ep 1`] = `
+"
+<p>Before</p>
+<%# this is a comment %>
+<% # this is too. %>
+<p>After</p>
+"
+`;
+
+exports[`tagform-comment-eq-close.html.ep 1`] = `
+"
+<p>Before</p>
+<%# comment with equal close =%>
+<p>After</p>
+"
+`;
+
+exports[`tagform-comment-multiline-stays-verbatim.html.ep 1`] = `
+"
+<p>Before</p>
+<%# line one
+     line two %>
+<p>After</p>
+"
+`;
+
+exports[`text-before-impure-block-own-line.html.ep 1`] = `
+"
+<button>
+	1
+	% if ($order eq 'ASC') {
+		<i class="up"></i>
+	% } else {
+		<i class="down"></i>
+	% }
+</button>
+"
+`;
