@@ -47,7 +47,7 @@ const warnWorkerUnavailable = () => {
     );
 };
 
-// A failure past this point is permanent; every in-flight request resolves to "unavailable" instead of hanging.
+// A failure past this point is permanent. Every in-flight request resolves to "unavailable" instead of hanging.
 const failWorker = () => {
     if (workerFailed) return;
     workerFailed = true;
@@ -168,8 +168,8 @@ export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): P
     const lines = stdout.replace(/\n$/, '').split('\n');
     if (depth === 0) return lines;
 
-    // The opening wrapper contributes two lines per depth level (`{` and its `#` comment); the closing
-    // wrapper contributes one (`}`).
+    // The opening wrapper contributes two lines per depth level (`{` and its `#` comment). The
+    // closing wrapper contributes one (`}`).
     const content = lines.slice(depth * 2, lines.length - depth);
     return content.length === 0 ? null : content;
 };

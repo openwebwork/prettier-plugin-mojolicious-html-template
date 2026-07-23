@@ -20,8 +20,8 @@ const LOWER_R = 114; // 'r'
 const isIdentChar = (c: number): boolean =>
     (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95; // a-z A-Z 0-9 _
 
-// Perl's bracket-style quote delimiters nest (`q{ a { nested } brace }`); every other delimiter closes
-// with itself (`q!...!`, `q#...#`, etc).
+// Perl's bracket-style quote delimiters nest (`q{ a { nested } brace }`). Every other delimiter
+// closes with itself (`q!...!`, `q#...#`, etc).
 const QUOTE_LIKE_CLOSERS: Partial<Record<number, number>> = {
     40: 41, // ( )
     123: 125, // { }
@@ -49,7 +49,7 @@ const skipQuoteLikeOperator = (input: InputStream, offset: number): number => {
     let depth = 1;
     while (depth > 0) {
         const c = input.peek(o);
-        if (c === -1) return offset; // unterminated - bail
+        if (c === -1) return offset; // unterminated, bail
         if (c === BACKSLASH) {
             o += 2;
             continue;
@@ -81,7 +81,7 @@ const skipStringOrComment = (input: InputStream, offset: number): number => {
             if (input.peek(o) === BACKSLASH) ++o;
             ++o;
         }
-        if (input.peek(o) === -1) return offset; // unterminated - bail
+        if (input.peek(o) === -1) return offset; // unterminated, bail
         return o + 1;
     }
     return offset;
@@ -95,8 +95,8 @@ const skipOutputSigil = (input: InputStream, offset: number): number => {
     return o;
 };
 
-// Opens a Block if the Perl content ends with `{`/`begin`, closes one if it starts with `}`/`end`;
-// both at once (`} else {`) is a MidMarker.
+// Opens a Block if the Perl content ends with `{`/`begin`, closes one if it starts with `}`/`end`.
+// Both at once (`} else {`) is a MidMarker.
 const classify = (content: string): number => {
     const trimmed = content.trim();
     const opens = /\{\s*$/.test(trimmed) || /\bbegin\s*$/.test(trimmed);
@@ -131,8 +131,8 @@ const isLineStart = (input: InputStream): boolean => {
 export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
     if (input.next === -1) return;
 
-    // A standalone `%` control line, from the `%` to end of line; leading indentation is its own Text
-    // token, consumed below.
+    // A standalone `%` control line, from the `%` to end of line. Leading indentation is its own
+    // Text token, consumed below.
     if (input.next === PERCENT && isLineStart(input)) {
         let offset = 1;
         let codeEnd = -1;
@@ -164,7 +164,8 @@ export const tokenizeMojo = new ExternalTokenizer((input: InputStream) => {
             input.acceptToken(classify(sliceByPeek(input, contentStart, classifyEnd)), offset + 1);
             return;
         }
-        // No closing `%>` found; fall through and treat the `<` as ordinary text.
+
+        // No closing `%>` found. Fall through and treat the `<` as ordinary text.
     }
 
     // Leading [ \t]* indentation of a percent-line, as its own Text token, so the marker branch above
