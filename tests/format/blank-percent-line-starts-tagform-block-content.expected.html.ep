@@ -1,5 +1,4 @@
 <%= form_for current_route, begin =%>
-    %
     % for (@items) {
         <%= hidden_field item => $_ =%>
     % }

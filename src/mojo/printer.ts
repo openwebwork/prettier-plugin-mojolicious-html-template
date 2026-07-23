@@ -135,6 +135,10 @@ const LEADING_BLANK_LINES_RE = /^\n([ \t]*\n)+/;
 // collapses a run of blank HTML lines down to one and preferring the `%` form the same way this plugin
 // already prefers it for a run of nothing but blank-`%` lines. A run with no blank-`%` line anywhere in
 // it is left untouched - prettier's own HTML printer already collapses that case correctly on its own.
+// A run touching the very start or end of a block's (or the whole file's) own content is dropped
+// entirely instead of collapsed - matching how prettier already strips a run of nothing but blank lines
+// there; `perltidy` alone has no such convention and wouldn't know to do this for a blank `%` line mixed
+// into that same edge run, so it's handled explicitly here instead.
 const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
     const nodes = [...rawNodes];
     const isRunMember = (node: MojoNode): boolean => isBlankPercentLine(node) || isWhollyBlankText(node);
@@ -158,32 +162,66 @@ const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
             i = j;
             continue;
         }
-        // The run's own leading edge (everything up to `anchor`) is about to be dropped entirely. A real
-        // bordering Text node already outside the run (`prev`) always already carries the one real
-        // newline `anchor` needs - by construction (a blank `%` line always starts its own physical
-        // line), trimming its own trailing blank-line edge, if it has one, is all that's needed; when
-        // `prev` isn't a Text node at all (a Block, another marker, or nothing - the very first thing
-        // inside a Block's own wrapper tag, say), that one real newline was instead the run's own leading
-        // Text member, about to be dropped along with the rest of the run - replaced with a minimal
-        // stand-in instead, so `anchor` doesn't end up glued straight onto whatever precedes this
-        // sequence with no separator at all.
         const prev = result.length > 0 ? result[result.length - 1] : undefined;
+        const next = j < nodes.length ? nodes[j] : undefined;
+        // A newline-only stand-in for whichever real run member it replaces - never `anchor` itself,
+        // so a dropped run never leaves a fake, mangled copy of a real marker node behind.
+        const newlineStub = (basis: MojoNode): MojoNode => ({ ...basis, type: 'Text', text: '\n' });
+        if (prev === undefined && next === undefined) {
+            // The run is this whole sequence - drop it entirely, nothing left on either side to
+            // separate from anything.
+            i = j;
+            continue;
+        }
+        if (prev === undefined && next !== undefined) {
+            // Touches the start of this block's (or the file's) own content - drop the whole run,
+            // `anchor` included, the same way prettier already strips a run of nothing but blank lines
+            // there. `next` (still inside this sequence) needs the same real-newline handling as the
+            // interior case below when it isn't Text - otherwise it ends up glued directly to whatever
+            // encloses this sequence (a Block's own wrapper tag) with no separator at all.
+            if (next.type === 'Text') {
+                if (LEADING_BLANK_LINES_RE.test(next.text)) {
+                    nodes[j] = { ...next, text: next.text.replace(LEADING_BLANK_LINES_RE, '\n') };
+                }
+            } else {
+                result.push(newlineStub(run[run.length - 1]));
+            }
+            i = j;
+            continue;
+        }
+        if (next === undefined && prev !== undefined) {
+            // Same reasoning, mirrored, for a run touching the end instead.
+            if (prev.type === 'Text') {
+                if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
+                    result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
+                }
+            } else {
+                result.push(newlineStub(run[0]));
+            }
+            i = j;
+            continue;
+        }
+        // An interior run (neither `prev` nor `next` undefined, by elimination), collapsing down to
+        // `anchor`. A real bordering Text node always already carries the one real newline `anchor`
+        // needs on that side - by construction (a blank `%` line always starts its own physical line),
+        // trimming its own trailing/leading blank-line edge, if it has one, is all that's needed. When a
+        // bordering node isn't Text at all (a Block or another marker sitting directly against the run,
+        // with nothing of its own to trim), a minimal stand-in newline is added instead, so `anchor`
+        // doesn't end up glued straight onto it with no separator.
         if (prev?.type === 'Text') {
             if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
                 result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
             }
-        } else if (run[0].type === 'Text') {
-            result.push({ ...run[0], text: '\n' });
+        } else {
+            result.push(newlineStub(run[0]));
         }
         result.push(anchor);
-        // Same reasoning, mirrored.
-        const next = j < nodes.length ? nodes[j] : undefined;
         if (next?.type === 'Text') {
             if (LEADING_BLANK_LINES_RE.test(next.text)) {
                 nodes[j] = { ...next, text: next.text.replace(LEADING_BLANK_LINES_RE, '\n') };
             }
-        } else if (run[run.length - 1].type === 'Text') {
-            result.push({ ...run[run.length - 1], text: '\n' });
+        } else {
+            result.push(newlineStub(run[run.length - 1]));
         }
         i = j;
     }
