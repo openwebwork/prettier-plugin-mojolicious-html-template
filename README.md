@@ -1,4 +1,4 @@
-# prettier-mojolicious-html-template
+# @openwebwork/prettier-plugin-mojolicious-html-template
 
 A [Prettier](https://prettier.io/) plugin for formatting [Mojolicious](https://mojolicious.org/)
 `.html.ep` and `.html.epl` templates.
@@ -43,7 +43,7 @@ consistently formatted, with the HTML and the Perl each laid out by the tool tha
 ## Installation
 
 ```sh
-npm install --save-dev prettier-mojolicious-html-template
+npm install --save-dev @openwebwork/prettier-plugin-mojolicious-html-template
 ```
 
 Requires Prettier `^3.9.4` as a peer dependency. Older Prettier 3.x releases (3.8.3, for example) are
@@ -55,7 +55,7 @@ Add the plugin to your Prettier configuration. In `.prettierrc`:
 
 ```json
 {
-    "plugins": ["prettier-mojolicious-html-template"]
+    "plugins": ["@openwebwork/prettier-plugin-mojolicious-html-template"]
 }
 ```
 
@@ -91,7 +91,7 @@ plugin to its own file pattern with `overrides` instead of listing both globally
 {
     "overrides": [
         { "files": "*.html", "options": { "plugins": ["@awmottaz/prettier-plugin-void-html"] } },
-        { "files": "*.html.ep", "options": { "plugins": ["prettier-mojolicious-html-template"] } }
+        { "files": "*.html.ep", "options": { "plugins": ["@openwebwork/prettier-plugin-mojolicious-html-template"] } }
     ]
 }
 ```
@@ -163,7 +163,7 @@ but written across several lines, it stays that way even though it would now fit
 
 ```sh
 git clone <this repository>
-cd prettier-mojolicious-html-template
+cd prettier-plugin-mojolicious-html-template
 npm install
 ```
 
