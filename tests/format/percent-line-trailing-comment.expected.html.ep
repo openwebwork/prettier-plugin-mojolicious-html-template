@@ -1,7 +1,0 @@
-% if ($file) {    # Check that it is a text file
-	<div>content</div>
-% } elsif ($other) {
-	<span>other</span>
-% } else {
-	<p>none</p>
-% }

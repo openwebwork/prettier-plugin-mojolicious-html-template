@@ -1,4 +1,0 @@
-<p>Before</p>
-<%# this is a comment %>
-<% # this is too. %>
-<p>After</p>

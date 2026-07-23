@@ -1,5 +1,0 @@
-<div>
-	<%= link_to $c->systemLink(url_for), class => 'btn', begin =%>
-		<i class="icon"></i>
-	<%= end %>
-</div>

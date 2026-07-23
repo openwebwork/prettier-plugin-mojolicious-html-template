@@ -1,8 +1,0 @@
-<button>
-	1
-	% if ($order eq 'ASC') {
-		<i class="up"></i>
-	% } else {
-		<i class="down"></i>
-	% }
-</button>

@@ -1,7 +1,0 @@
-<p>
-	Some text\
-	<% if ($x) { =%>
-		<%= $x %>\
-	<% } =%>\
-	More text after.
-</p>

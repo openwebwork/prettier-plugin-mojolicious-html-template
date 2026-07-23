@@ -1,5 +1,0 @@
-<div class="rpc_render_area">\
-	<% if ($error) { =%>\
-		<div class="alert alert-danger p-1 mb-0 fw-bold"><%= $error %></div>
-	<% } =%>\
-</div>

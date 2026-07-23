@@ -1,3 +1,0 @@
-% my $x = 'test';
-% $x =~ s/\"//g;
-<div>hello</div>

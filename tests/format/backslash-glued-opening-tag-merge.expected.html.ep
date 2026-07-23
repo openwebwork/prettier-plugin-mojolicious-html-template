@@ -1,5 +1,0 @@
-<div>
-	<span class="input-group-text flex-grow-1">\
-		<%== maketext('assignments and dates for <strong>one</strong> user') =%>\
-	</span>
-</div>

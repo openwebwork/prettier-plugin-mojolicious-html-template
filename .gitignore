@@ -4,3 +4,4 @@ node_modules
 CLAUDE.local.md
 src/mojo/mojo.grammar.js
 src/mojo/mojo.grammar.terms.js
+tests/__snapshots__

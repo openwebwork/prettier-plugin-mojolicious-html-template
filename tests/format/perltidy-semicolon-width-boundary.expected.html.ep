@@ -1,5 +1,0 @@
-<div class="container my-3">
-    <div class="input-group mb-3">
-        <%= text_field 'problem-seed' => config->{defaultProblemSeed}, class => 'form-control', id => 'problem-seed' =%>
-    </div>
-</div>
