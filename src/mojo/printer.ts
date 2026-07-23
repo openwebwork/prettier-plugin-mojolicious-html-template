@@ -166,20 +166,28 @@ const startsWithHtmlCloseTag = (text: string): boolean => HTML_CLOSE_TAG_AT_STAR
 // HTML element's own content, not just a Mojo control-flow Block. This AST has no notion of HTML
 // nesting at all (an HTML tag is just characters inside a Text node's text), so that's detected
 // separately, via `endsWithHtmlOpenTag`/`startsWithHtmlCloseTag` on the bordering Text node's raw text.
-const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
+//
+// None of this applies inside `<pre>`, where every character is rendering-significant, including a
+// blank line's own newlines. Collapsing or dropping one there would be a visible change to the
+// rendered page, not just a formatting nicety - `initiallyInsidePre` (the state at the very start of
+// `rawNodes`) combined with `computeInsidePreFlags` (tracking `<pre>`/`</pre>` opening or closing
+// partway through, mid-array) excludes any such node from run membership entirely.
+const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): MojoNode[] => {
     const nodes = [...rawNodes];
-    const isRunMember = (node: MojoNode): boolean => isBlankPercentLine(node) || isWhollyBlankText(node);
+    const insidePreFlags = computeInsidePreFlags(nodes, initiallyInsidePre);
+    const isRunMember = (index: number): boolean =>
+        !insidePreFlags[index] && (isBlankPercentLine(nodes[index]) || isWhollyBlankText(nodes[index]));
     const result: MojoNode[] = [];
     let i = 0;
     while (i < nodes.length) {
         const node = nodes[i];
-        if (!isRunMember(node)) {
+        if (!isRunMember(i)) {
             result.push(node);
             ++i;
             continue;
         }
         let j = i + 1;
-        while (j < nodes.length && isRunMember(nodes[j])) ++j;
+        while (j < nodes.length && isRunMember(j)) ++j;
         const run = nodes.slice(i, j);
         const anchor = run.find(isBlankPercentLine);
         if (!anchor) {
@@ -324,6 +332,23 @@ const isInsidePre = (skeletonSoFar: string): boolean => {
     const opens = skeletonSoFar.match(PRE_OPEN_TAG_RE)?.length ?? 0;
     const closes = skeletonSoFar.match(PRE_CLOSE_TAG_RE)?.length ?? 0;
     return opens > closes;
+};
+
+// Whether we're inside `<pre>` at the start of each node in `nodes`, given the state before the very
+// first one. An incremental version of `isInsidePre`, needed by `collapseBlankRuns`: `<pre>` can open
+// or close partway through a single `visitSequence` call, since it's just characters inside a Text
+// node's own text, not a boundary this AST already splits sibling sequences on.
+const PRE_TAG_RE = /<pre(?:\s[^<>]*)?>|<\/pre>/g;
+const computeInsidePreFlags = (nodes: MojoNode[], initiallyInsidePre: boolean): boolean[] => {
+    const flags: boolean[] = [];
+    let inside = initiallyInsidePre;
+    for (const node of nodes) {
+        flags.push(inside);
+        for (const match of node.text.matchAll(PRE_TAG_RE)) {
+            inside = !match[0].startsWith('</');
+        }
+    }
+    return flags;
 };
 
 // Whether `skeletonSoFar` sits inside a real HTML tag's still-open angle brackets (plain backward
@@ -471,7 +496,12 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // placement. Most structural markers don't need this: the empty-wrapper-separator logic in
         // `visitSequence` already handles their own-line separation (a `%`-opened Block, or a bare `%`
         // control line), except a tag-form `CloseMarker`, which gets its own, narrower anchor below.
-        if (node.type === 'PlainMarker' && ownLine) {
+        // Skipped inside `<pre>`: nothing there ever reflows, so the wrapper serves no purpose.
+        // Everywhere else, prettier always lays a block-display tag like `<colgroup>` out on its own
+        // line, but `<pre>` preserves the skeleton's raw text exactly as written. That leaves the
+        // wrapper glued in place with no surrounding whitespace for `stripWrappersAndSubstitute`'s
+        // line-based matching to find, so it leaks into the final output instead of being stripped.
+        if (node.type === 'PlainMarker' && ownLine && !insidePre) {
             skeleton += `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
             return;
         }
@@ -506,15 +536,18 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
         // that's unstable across passes, since fit depends on width elsewhere that can change once
         // formatted. For the bare shape it can produce an unparsable template. A marker genuinely
         // glued zero-gap (`ownLine` false) is unaffected. `isPureBlock`/`registerRegion` intercepts a
-        // bare-`%`-only Block first, so this never fires redundantly there.
-        if ((node.type === 'CloseMarker' || node.type === 'MidMarker') && ownLine) {
+        // bare-`%`-only Block first, so this never fires redundantly there. Skipped inside `<pre>` for
+        // the same reason as the marker wrapper above: nothing reflows there, so there's no risk to
+        // guard against, and the anchor would just leak into the output unstripped.
+        if ((node.type === 'CloseMarker' || node.type === 'MidMarker') && ownLine && !insidePre) {
             skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
         }
         skeleton += placeholder;
     };
 
     // Registers a maximal run of `isEligibleRegionMember` siblings as one combined `perltidy` unit.
-    // Uses the same own-line wrapper mechanism as a single marker.
+    // Uses the same own-line wrapper mechanism as a single marker, skipped inside `<pre>` for the same
+    // reason `registerMarker`'s own skips it - see there.
     const registerRegion = (nodes: MojoNode[]) => {
         const id = counter++;
 
@@ -524,14 +557,15 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
             .map((n) => n.text)
             .join('')
             .trim();
+        const insidePre = isInsidePre(skeleton);
         markers[id] = {
             text,
-            insidePre: false,
+            insidePre,
             ownLine: true,
             region: { body: nodes.map(flattenNode).join('').trim() }
         };
         const placeholder = makePlaceholder(id);
-        skeleton += `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
+        skeleton += insidePre ? placeholder : `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
     };
 
     // A run of sibling nodes. Scans for maximal `isEligibleRegionMember` runs first, registering each
@@ -542,7 +576,7 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
     // specifically, so no separate exception is needed. One would wrongly block a nested bare-`%`
     // Block's own required anchor.
     const visitSequence = (rawNodes: MojoNode[], isTopLevel = false) => {
-        const nodes = collapseBlankRuns(rawNodes);
+        const nodes = collapseBlankRuns(rawNodes, isInsidePre(skeleton));
         let i = 0;
         while (i < nodes.length) {
             // A region only ever starts at a real anchor, never a connector. Otherwise a leading
@@ -600,18 +634,20 @@ const buildSkeleton = (programNode: MojoNode): Skeleton => {
                 // placeholder or a Block's open tag, both zero-width/inline in the skeleton). Without
                 // an anchor, prettier's fill algorithm may collapse it onto the placeholder's own
                 // line. A wholly-blank Text node is handled by its own trailing-anchor case below
-                // instead. Same `isInsideOpenTagAttrs` exclusion as `ownLine` above.
-                if (/^\n[ \t]*\S/.test(node.text) && !isInsideOpenTagAttrs(skeleton)) {
+                // instead. Same `isInsideOpenTagAttrs` exclusion as `ownLine` above. None of this
+                // applies inside `<pre>`, whose content is never reflowed in the first place.
+                if (/^\n[ \t]*\S/.test(node.text) && !isInsideOpenTagAttrs(skeleton) && !wasInsidePre) {
                     skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
                 }
                 skeleton += wasInsidePre ? text : withBackslashContinuationAnchors(text);
 
                 // Skip the anchor after the document's very last node, since it would defeat
-                // prettier's own trailing-blank-line stripping.
+                // prettier's own trailing-blank-line stripping. Also skipped inside `<pre>`, same
+                // reason as the leading-newline anchor just above.
                 const isTrailingAtDocumentEnd = isTopLevel && i === nodes.length - 1;
-                if (node.text.trim() === '' && node.text.includes('\n') && !isTrailingAtDocumentEnd) {
+                if (node.text.trim() === '' && node.text.includes('\n') && !isTrailingAtDocumentEnd && !wasInsidePre) {
                     skeleton += WRAPPER_OPEN_TAG + WRAPPER_CLOSE_TAG;
-                } else if (/\n[ \t]*$/.test(node.text)) {
+                } else if (/\n[ \t]*$/.test(node.text) && !wasInsidePre) {
                     // Real text ending in a genuine trailing newline, right before something that
                     // needs its own line for correctness (a `%` control line must start its own
                     // physical line or Mojolicious fails to parse it). Narrower than the
