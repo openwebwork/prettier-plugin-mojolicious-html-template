@@ -9,15 +9,32 @@ jobs:
     test:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v6
+            - name: Checkout code
+              uses: actions/checkout@v6
 
-            - uses: actions/setup-node@v6
+            - name: Install Ubuntu dependencies
+              run: sudo apt-get update && sudo apt-get install -y libmojolicious-perl cpanminus
+
+            - name: Install Perl dependencies
+              run: sudo cpanm -n Perl::Tidy@20260204
+
+            - name: Install Node
+              uses: actions/setup-node@v6
               with:
                   node-version: 24
                   cache: npm
 
-            - run: npm ci
-            - run: npm run format:check
-            - run: npm run build
-            - run: npm run lint:check
-            - run: npm test
+            - name: Install Node dependencies
+              run: npm ci
+
+            - name: Check formatting of files with prettier
+              run: npm run format:check
+
+            - name: Check that the build works
+              run: npm run build
+
+            - name: Lint files with eslint
+              run: npm run lint:check
+
+            - name: Check that the unit tests pass.
+              run: npm test
