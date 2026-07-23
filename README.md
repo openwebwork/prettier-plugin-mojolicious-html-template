@@ -158,6 +158,9 @@ but written across several lines, it stays that way even though it would now fit
 - [`perltidy`](https://metacpan.org/pod/Perl::Tidy) (the `perl` interpreter with `Perl::Tidy` installed)
   on `PATH`, for embedded Perl to be reformatted. Without it, the plugin still formats the surrounding
   HTML and leaves Perl content as-is.
+- [`Mojolicious`](https://metacpan.org/pod/Mojolicious) itself, available to that same `perl`. The worker
+  process that talks to `perltidy` is a small Perl script that uses `Mojo::JSON`, so reformatting embedded
+  Perl needs both `Perl::Tidy` and `Mojolicious` installed, not just the former.
 
 ## Development
 
