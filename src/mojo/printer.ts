@@ -130,6 +130,23 @@ const isWhollyBlankText = (node: MojoNode): boolean => node.type === 'Text' && n
 const TRAILING_BLANK_LINES_RE = /\n([ \t]*\n)+$/;
 const LEADING_BLANK_LINES_RE = /^\n([ \t]*\n)+/;
 
+// A real (content-bearing) HTML opening tag sitting at the very end of a Text node's text, with nothing
+// but whitespace after it - i.e. whatever comes next is that tag's first child. Excludes a void element
+// (`<br>`, `<input>`, ...) or a self-closing tag, neither of which opens any content for a following run
+// to be "inside" of. `VOID_ELEMENTS` is declared further down, alongside `normalizeVoidElements`.
+const HTML_OPEN_TAG_AT_END_RE = /<([a-zA-Z][\w-]*)((?:\s[^<>]*)?)>\s*$/;
+const endsWithHtmlOpenTag = (text: string): boolean => {
+    const match = HTML_OPEN_TAG_AT_END_RE.exec(text);
+    if (!match) return false;
+    const [, tagName, attrs] = match;
+    return !VOID_ELEMENTS.has(tagName.toLowerCase()) && !attrs.trimEnd().endsWith('/');
+};
+
+// An HTML closing tag sitting at the very start of a Text node's text, ignoring only leading whitespace -
+// i.e. whatever came before is that tag's last child.
+const HTML_CLOSE_TAG_AT_START_RE = /^\s*<\/[a-zA-Z][\w-]*>/;
+const startsWithHtmlCloseTag = (text: string): boolean => HTML_CLOSE_TAG_AT_START_RE.test(text);
+
 // Collapses a maximal run of blank-`%` lines and whitespace-only lines - including a bordering Text
 // node's own trailing/leading blank-line edge - down to a single blank-`%` line, matching how prettier
 // collapses a run of blank HTML lines down to one and preferring the `%` form the same way this plugin
@@ -138,7 +155,11 @@ const LEADING_BLANK_LINES_RE = /^\n([ \t]*\n)+/;
 // A run touching the very start or end of a block's (or the whole file's) own content is dropped
 // entirely instead of collapsed - matching how prettier already strips a run of nothing but blank lines
 // there; `perltidy` alone has no such convention and wouldn't know to do this for a blank `%` line mixed
-// into that same edge run, so it's handled explicitly here instead.
+// into that same edge run, so it's handled explicitly here instead. "Block" here also means a plain HTML
+// element's own content, not just a Mojo control-flow Block - this AST has no notion of HTML nesting at
+// all (an HTML tag is just characters inside a Text node's own text to it), so that's detected separately
+// via `endsWithHtmlOpenTag`/`startsWithHtmlCloseTag` on whichever bordering Text node's raw text, rather
+// than through any node-array-boundary check.
 const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
     const nodes = [...rawNodes];
     const isRunMember = (node: MojoNode): boolean => isBlankPercentLine(node) || isWhollyBlankText(node);
@@ -164,33 +185,38 @@ const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
         }
         const prev = result.length > 0 ? result[result.length - 1] : undefined;
         const next = j < nodes.length ? nodes[j] : undefined;
+        const atStart = prev === undefined || (prev.type === 'Text' && endsWithHtmlOpenTag(prev.text));
+        const atEnd = next === undefined || (next.type === 'Text' && startsWithHtmlCloseTag(next.text));
         // A newline-only stand-in for whichever real run member it replaces - never `anchor` itself,
         // so a dropped run never leaves a fake, mangled copy of a real marker node behind.
         const newlineStub = (basis: MojoNode): MojoNode => ({ ...basis, type: 'Text', text: '\n' });
-        if (prev === undefined && next === undefined) {
-            // The run is this whole sequence - drop it entirely, nothing left on either side to
-            // separate from anything.
+        if (atStart && atEnd) {
+            // The run touches both boundaries of whatever it's inside (a Block, an HTML element, or the
+            // file) - drop it entirely, nothing left on either side to separate from anything.
             i = j;
             continue;
         }
-        if (prev === undefined && next !== undefined) {
-            // Touches the start of this block's (or the file's) own content - drop the whole run,
-            // `anchor` included, the same way prettier already strips a run of nothing but blank lines
-            // there. `next` (still inside this sequence) needs the same real-newline handling as the
-            // interior case below when it isn't Text - otherwise it ends up glued directly to whatever
-            // encloses this sequence (a Block's own wrapper tag) with no separator at all.
-            if (next.type === 'Text') {
+        if (atStart) {
+            // Touches the start of this block's (or the file's, or an HTML element's) own content - drop
+            // the whole run, `anchor` included, the same way prettier already strips a run of nothing but
+            // blank lines there. `next` (guaranteed defined here, since `atEnd` is false whenever `atStart`
+            // alone triggers this branch) needs the same real-newline handling as the interior case below
+            // when it isn't Text - otherwise it ends up glued directly to whatever comes right after the
+            // dropped run (a nested Block's own wrapper tag, most commonly) with no separator at all.
+            if (next?.type === 'Text') {
                 if (LEADING_BLANK_LINES_RE.test(next.text)) {
                     nodes[j] = { ...next, text: next.text.replace(LEADING_BLANK_LINES_RE, '\n') };
                 }
-            } else {
+            } else if (next !== undefined) {
                 result.push(newlineStub(run[run.length - 1]));
             }
             i = j;
             continue;
         }
-        if (next === undefined && prev !== undefined) {
-            // Same reasoning, mirrored, for a run touching the end instead.
+        if (atEnd) {
+            // Same reasoning, mirrored, for a run touching the end instead. `prev` is guaranteed defined
+            // here - `atStart` (checked, and dealt with, above) is false by this point, and its own
+            // definition is exactly what rules out `prev === undefined`.
             if (prev.type === 'Text') {
                 if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
                     result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
@@ -201,14 +227,14 @@ const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
             i = j;
             continue;
         }
-        // An interior run (neither `prev` nor `next` undefined, by elimination), collapsing down to
-        // `anchor`. A real bordering Text node always already carries the one real newline `anchor`
-        // needs on that side - by construction (a blank `%` line always starts its own physical line),
-        // trimming its own trailing/leading blank-line edge, if it has one, is all that's needed. When a
-        // bordering node isn't Text at all (a Block or another marker sitting directly against the run,
-        // with nothing of its own to trim), a minimal stand-in newline is added instead, so `anchor`
-        // doesn't end up glued straight onto it with no separator.
-        if (prev?.type === 'Text') {
+        // An interior run (neither `atStart` nor `atEnd`, by elimination - so both `prev` and `next` are
+        // guaranteed defined here too), collapsing down to `anchor`. A real bordering Text node always
+        // already carries the one real newline `anchor` needs on that side - by construction (a blank `%`
+        // line always starts its own physical line), trimming its own trailing/leading blank-line edge,
+        // if it has one, is all that's needed. When a bordering node isn't Text at all (a Block or another
+        // marker sitting directly against the run, with nothing of its own to trim), a minimal stand-in
+        // newline is added instead, so `anchor` doesn't end up glued straight onto it with no separator.
+        if (prev.type === 'Text') {
             if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
                 result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
             }
@@ -216,7 +242,7 @@ const collapseBlankRuns = (rawNodes: MojoNode[]): MojoNode[] => {
             result.push(newlineStub(run[0]));
         }
         result.push(anchor);
-        if (next?.type === 'Text') {
+        if (next.type === 'Text') {
             if (LEADING_BLANK_LINES_RE.test(next.text)) {
                 nodes[j] = { ...next, text: next.text.replace(LEADING_BLANK_LINES_RE, '\n') };
             }

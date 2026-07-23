@@ -1,0 +1,11 @@
+<div class="d-flex flex-wrap justify-content-center">
+	<div class="d-flex flex-wrap justify-content-center mb-2">
+		%
+
+		<div>
+			<%= label_for 'from', begin =%><b><%= maketext('From:') %></b><% end =%>
+		</div>
+		%
+		%
+	</div>
+</div>
