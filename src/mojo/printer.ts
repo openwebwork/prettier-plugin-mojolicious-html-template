@@ -6,37 +6,37 @@ import { findPerltidyrc, runPerltidy } from './perltidy.js';
 const isStructuralMarker = (type: string): boolean =>
     type === 'OpenMarker' || type === 'MidMarker' || type === 'CloseMarker';
 
-// Unicode Private-Use-Area sentinels. They can't collide with real content, and each stays one
-// whitespace-free word so HTML's text-wrapping can't split it.
+// Unicode Private-Use-Area sentinels. They will not collide with real content, and each stays as one
+// whitespace-free word so that prettier's HTML text-wrapping will not split it.
 const MARKER_OPEN = `${String.fromCharCode(0xe000)}MOJO`;
 const MARKER_CLOSE = String.fromCharCode(0xe001);
-// A `\` glued directly, with no whitespace, to whatever preceded it.
+// A `\` glued directly with no whitespace to whatever preceded it.
 const GLUED_BACKSLASH_SENTINEL = String.fromCharCode(0xe003);
 // A space that must not become a line-break opportunity.
 const NO_BREAK_SENTINEL = String.fromCharCode(0xe004);
 // Marks the spot right after a `<pre ...>` tag whose content doesn't already start with a newline.
 const PRE_GLUE_SENTINEL = String.fromCharCode(0xe005);
-// Marks a `PlainMarker` glued to a real HTML tag's own `>` on its left side.
+// Marks a `PlainMarker` glued to a real HTML tag's `>` on its left side.
 const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 // Brackets a masked-out Mojo marker span during `normalizeVoidElements`. See there for why.
 const MASKED_MARKER_OPEN = String.fromCharCode(0xe007);
 const MASKED_MARKER_CLOSE = String.fromCharCode(0xe008);
 
-// `<colgroup data-mojo-wrapper>` forces an element's children onto their own lines. Prettier only does
-// that unconditionally for a hardcoded set of real tags, so a made-up tag would just collapse when
-// short, which is wrong for Perl control-flow blocks. `<colgroup>` collides least with genuine template
-// markup. A real `</colgroup>` elsewhere is still handled as a collision, by `classifyWrapperCloses`
-// below.
+// A `<colgroup>` is used to mark open tags as prettier forces it's children onto separate lines.
+// Prettier only does that unconditionally for a hardcoded set of real tags. A made-up tag would just
+// collapse when short which is incorrect for Perl control-flow blocks. `<colgroup>` collides least
+// with genuine template markup. A real `</colgroup>` elsewhere is still handled as a collision by
+// `classifyWrapperCloses` below.
 const WRAPPER_OPEN_TAG = '<colgroup data-mojo-wrapper>';
 const WRAPPER_CLOSE_TAG = '</colgroup>';
 
-// A wrapper for a `<%`-delimited Block's own content, e.g. `<%= ..., begin =%> ... <% end =%>` or
-// `<% if (...) { %> ... <% } %>`. A bare-`%`-opened Block's content must never collapse even when
-// short (that's why `WRAPPER_OPEN_TAG` exists: Mojolicious requires a bare `%` control line to start
-// its own physical line). A `<%`-delimited Block has no such restriction. It should lay out like a
-// real HTML element and collapse when it fits, even glued zero-gap to the Block's own markers, the
-// same way `perltidy` collapses real Perl control-flow when it fits. A block-display tag can't do
-// that, since it's always forced onto its own line regardless of width. `<bdi>` is real, inline, and
+// A wrapper for a `<%`-delimited Block's content, e.g. `<%= ..., begin =%> ... <% end =%>` or
+// `<% if (...) { %> ... <% } %>`. A bare `%` opened Block's content must never collapse even when
+// short. That's why `WRAPPER_OPEN_TAG` exists. Mojolicious requires a bare `%` control line to start
+// its own physical line. A `<%` delimited Block has no such restriction. It should lay out like a
+// real HTML element and collapse when it fits, even glued zero-gap to the Block's markers, the same
+// way `perltidy` collapses real Perl control-flow when it fits. A block-display tag can't do that,
+// since it's always forced onto its own line regardless of width. `<bdi>` is real, inline, and
 // collides least with genuine markup.
 const TAGFORM_WRAPPER_OPEN_TAG = '<bdi data-mojo-tagform-wrapper>';
 const TAGFORM_WRAPPER_CLOSE_TAG = '</bdi>';
@@ -401,15 +401,10 @@ const flattenNode = (node: MojoNode): string => {
 // influences the final layout, in either pass (see `buildPass1MarkerDoc` for Pass 1's own reason).
 const makePlaceholder = (id: number): string => `${MARKER_OPEN}${id.toString()}${MARKER_CLOSE}`;
 
-interface Skeleton {
-    skeleton: string;
-    markers: MarkerInfo[];
-}
-
 // Builds a plain-HTML "skeleton" standing in for the whole template. Every Mojo marker becomes a
 // unique placeholder, and a Block's content is wrapped in the synthetic element above, so prettier's
 // HTML parser sees and matches tags across Mojo markers in one combined parse.
-const buildSkeleton = (programNode: MojoNode): Skeleton => {
+const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: MarkerInfo[] } => {
     // Source text, used to check whether a marker sits alone on its own line. See `isOwnLine` below.
     const source = programNode.text;
     const markers: MarkerInfo[] = [];
@@ -1157,8 +1152,7 @@ const MOJO_MARKER_SPAN_RE = /<%[\s\S]*?%>|^[ \t]*%.*$/gm;
 const normalizeVoidElements = (text: string): string => {
     const spans: string[] = [];
     const masked = text.replace(MOJO_MARKER_SPAN_RE, (match) => {
-        const id = (spans.push(match) - 1).toString();
-        return `${MASKED_MARKER_OPEN}${id}${MASKED_MARKER_CLOSE}`;
+        return `${MASKED_MARKER_OPEN}${(spans.push(match) - 1).toString()}${MASKED_MARKER_CLOSE}`;
     });
     const transformed = masked.replace(SELF_CLOSING_TAG_RE, (_match, tagName: string, attrs: string) => {
         // `attrs`'s own pattern greedily swallows the whitespace the outer regex left room for before
