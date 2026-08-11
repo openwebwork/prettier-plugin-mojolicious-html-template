@@ -9,9 +9,9 @@ use warnings;
 use Perl::Tidy;
 use Mojo::JSON qw(decode_json encode_json true false);
 
-$| = 1;
+local $| = 1;
 
-while (my $line = <STDIN>) {
+while (my $line = <>) {
     chomp $line;
     next if $line eq '';
 
