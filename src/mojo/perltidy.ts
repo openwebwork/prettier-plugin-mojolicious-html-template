@@ -23,6 +23,38 @@ export interface RunPerltidyOptions {
     printWidth: number;
 }
 
+export interface PerltidyErrorLoc {
+    start: { line: number; column: number };
+    end?: { line: number; column: number };
+}
+
+// This exception is thrown when perltidy cannot be used. This plugin requires perltidy to format embedded Perl.
+// This has no real "location", so `loc` just points at the top of the file.
+export class PerltidyUnavailableError extends Error {
+    readonly loc: PerltidyErrorLoc = { start: { line: 1, column: 1 } };
+
+    constructor() {
+        super(
+            'prettier-plugin-mojolicious-html-template: perltidy is required to format embedded Perl, ' +
+                'but it is not installed.'
+        );
+        this.name = 'PerltidyUnavailableError';
+    }
+}
+
+// This exception is thrown when perltidy runs but reports a failure on the embedded Perl in a marker or region. This
+// also causes the `format` call to fail, matching how prettier refuses to format a file it can't parse. `loc` should
+// point at the offending marker or region in the template, so that the correct position is highlighted.
+export class PerltidyFormatError extends Error {
+    readonly loc: PerltidyErrorLoc;
+
+    constructor(source: string, loc: PerltidyErrorLoc) {
+        super('prettier-plugin-mojolicious-html-template: perltidy unable to format embedded Perl:\n\n' + source);
+        this.name = 'PerltidyFormatError';
+        this.loc = loc;
+    }
+}
+
 // Talks to a persistent `perltidy-worker.pl` process instead of shelling out to `perltidy` per call.
 interface WorkerResponse {
     id: number;
@@ -32,26 +64,16 @@ interface WorkerResponse {
 
 let worker: ChildProcessWithoutNullStreams | undefined;
 let workerFailed = false;
-let warnedWorkerUnavailable = false;
 let nextRequestId = 1;
 let pendingCount = 0;
 const pendingRequests = new Map<number, (result: { code: number | null; stdout: string }) => void>();
 let stdoutBuffer = '';
 
-const warnWorkerUnavailable = () => {
-    if (warnedWorkerUnavailable) return;
-    warnedWorkerUnavailable = true;
-    console.error(
-        'prettier-plugin-mojolicious-html-template: the perltidy worker (`perl` with `Perl::Tidy` installed) ' +
-            'is not available - embedded Perl will be left unformatted. Install perltidy to enable Perl reformatting.'
-    );
-};
-
-// A failure past this point is permanent. Every in-flight request resolves to "unavailable" instead of hanging.
+// A failure past this point is permanent. Every request resolves to "unavailable" instead of
+// hanging. `runPerltidy` throws the `PerltidyUnavailableError` exception in this case.
 const failWorker = () => {
     if (workerFailed) return;
     workerFailed = true;
-    warnWorkerUnavailable();
     for (const resolve of pendingRequests.values()) resolve({ code: null, stdout: '' });
     pendingRequests.clear();
 };
@@ -135,9 +157,10 @@ const spawnPerltidy = (args: string[], input: string): Promise<{ code: number | 
     });
 };
 
-// Reformats `perlCode` with perltidy, wrapped in `depth` nested bare Perl blocks first so perltidy's own
-// indentation/line-wrapping accounts for the surrounding HTML depth. Returns the reformatted lines with
-// the synthetic wrapper stripped, or `null` if perltidy isn't available or fails.
+// Reformats `perlCode` with perltidy, wrapped in `depth` nested bare Perl blocks first so perltidy's indentation and
+// line-wrapping accounts for the surrounding HTML depth. Returns the reformatted lines with the synthetic wrapper
+// stripped, or `null` if perltidy ran but failed on the content. Throws `PerltidyUnavailableError` if perltidy cannot
+// be used.
 export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): Promise<string[] | null> => {
     const { configPath, depth, useTabs, tabWidth, printWidth } = opts;
 
@@ -159,6 +182,7 @@ export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): P
     let stdout = '';
     for (let iteration = 0; iteration < 4; ++iteration) {
         const result = await spawnPerltidy(args, text);
+        if (result.code === null) throw new PerltidyUnavailableError();
         if (result.code !== 0) return null;
         stdout = result.stdout;
         if (stdout.replace(/\n$/, '') === text.replace(/\n$/, '')) break;
@@ -172,4 +196,9 @@ export const runPerltidy = async (perlCode: string, opts: RunPerltidyOptions): P
     // closing wrapper contributes one (`}`).
     const content = lines.slice(depth * 2, lines.length - depth);
     return content.length === 0 ? null : content;
+};
+
+export const ensurePerltidyAvailable = async (): Promise<void> => {
+    const result = await spawnPerltidy(['-npro'], '');
+    if (result.code === null) throw new PerltidyUnavailableError();
 };

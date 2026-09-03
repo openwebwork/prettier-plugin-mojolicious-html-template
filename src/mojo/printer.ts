@@ -1,7 +1,7 @@
 import { dirname } from 'node:path';
 import { doc, type AstPath, type Doc, type Options } from 'prettier';
 import type { MojoNode } from './ast.js';
-import { findPerltidyrc, runPerltidy } from './perltidy.js';
+import { findPerltidyrc, runPerltidy, PerltidyFormatError } from './perltidy.js';
 
 const isStructuralMarker = (type: string): boolean =>
     type === 'OpenMarker' || type === 'MidMarker' || type === 'CloseMarker';
@@ -63,6 +63,16 @@ interface MarkerInfo {
     ownLine: boolean;
     reformat?: { prefix: string; body: string; suffix: string };
     region?: { body: string };
+    // Whether this marker is a Block's OpenMarker, MidMarker, or CloseMarker. A structural marker's body (e.g. `if
+    // ($error) {`) is *never* a complete, balanced Perl fragment so perltidy fails on it regardless of whether the Perl
+    // is otherwise fine. That is an accepted syntax, not a sign of a real problem, so `validateEmbeddedPerl` must not
+    // treat a structural marker's failure as fatal the way it does for a self-contained one.
+    structural: boolean;
+    // Character offsets into the *original* source (not the skeleton), so `validateEmbeddedPerl` can
+    // point `PerltidyFormatError.loc` at the actual offending spot in the template - see
+    // `offsetToLineColumn`.
+    start: number;
+    end: number;
 }
 
 // Splits a reformat-eligible `PlainMarker`'s text into its delimiter and body, or `undefined` for a
@@ -483,7 +493,15 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
         // is just as self-contained as any other tag-form marker, so it's eligible the same way. No
         // need to gate on `node.type` here at all.
         const reformat = splitMarkerDelimiters(node.text);
-        markers[id] = { text: node.text, insidePre, ownLine, reformat };
+        markers[id] = {
+            text: node.text,
+            insidePre,
+            ownLine,
+            reformat,
+            structural: isStructuralMarker(node.type),
+            start: node.start,
+            end: node.end
+        };
         const placeholder = makePlaceholder(id);
 
         // A bare placeholder is just text to HTML and reflows regardless of source formatting. An
@@ -557,7 +575,12 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
             text,
             insidePre,
             ownLine: true,
-            region: { body: nodes.map(flattenNode).join('').trim() }
+            region: { body: nodes.map(flattenNode).join('').trim() },
+            // The joined region body is a complete Perl program by construction, unlike a lone structural marker.
+            // So a failure here is always treated as fatal in `validateEmbeddedPerl`.
+            structural: false,
+            start: nodes[0].start,
+            end: nodes[nodes.length - 1].end
         };
         const placeholder = makePlaceholder(id);
         skeleton += insidePre ? placeholder : `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
@@ -734,12 +757,22 @@ const substituteMarkers = (line: string, markers: MarkerInfo[]): string =>
 // never fires for a marker embedded inline with other text.
 const SOLE_MARKER_RE = new RegExp(`^${MARKER_OPEN}(\\d+)${MARKER_CLOSE}$`);
 
-interface PerltidyContext {
+export interface PerltidyContext {
     perltidyrcPath: string | undefined;
     useTabs: boolean;
     tabWidth: number;
     printWidth: number;
 }
+
+// Shared between `parse`'s validation pass and `embed`'s formatting pass,
+// so both resolve `.perltidyrc`, tabWidth, etc., identically.
+export const buildPerltidyContext = (options: Options): PerltidyContext => ({
+    // Searched once per file, walking upward from the template's directory.
+    perltidyrcPath: findPerltidyrc(dirname(options.filepath ?? process.cwd())),
+    useTabs: options.useTabs ?? false,
+    tabWidth: options.tabWidth ?? 2,
+    printWidth: options.printWidth ?? 80
+});
 
 // A closing scaffolding tag can't carry a disambiguating attribute, so a genuine one the template's
 // own HTML contains needs telling apart from this plugin's own. Both `<colgroup>` and `<bdi>` behave
@@ -897,10 +930,9 @@ const buildPass1MarkerDoc = (id: number, marker: MarkerInfo): Doc => {
     return linesToDoc(lines, !marker.insidePre);
 };
 
-// Builds the reformatted-and-glued Doc for a `reformat`-eligible marker, mirroring the
-// delimiter-gluing `stripWrappersAndSubstitute` used to do at text-substitution time. Returns
-// `undefined` if `perltidy` isn't available, fails, or can't safely apply (a percent-form result
-// that came back multi-line), so the caller falls back to raw passthrough.
+// Builds the reformatted-and-glued Doc for a `reformat`-eligible marker. Returns `undefined` if `perltidy` fails on the
+// content or cannot safely apply, so the caller falls back to raw passthrough. Propagates `PerltidyUnavailableError`
+// uncaught - perltidy being unusable at all fails the whole format call rather than silently leaving Perl unformatted.
 const buildReformattedDoc = async (
     reformat: NonNullable<MarkerInfo['reformat']>,
     insidePre: boolean,
@@ -1486,6 +1518,77 @@ const stripWrappersAndSubstitute = async (
     return output.join('\n');
 };
 
+// Converts a character offset into the original source into a 1-indexed {line, column},
+// which is the shape `PerltidyFormatError.loc` needs.
+const offsetToLineColumn = (text: string, offset: number): { line: number; column: number } => {
+    let line = 1;
+    let lineStart = 0;
+    for (let i = 0; i < offset && i < text.length; ++i) {
+        if (text[i] === '\n') {
+            line++;
+            lineStart = i + 1;
+        }
+    }
+    return { line, column: offset - lineStart + 1 };
+};
+
+// Runs every reformat-eligible marker's/region's Perl through perltidy once, at `parse` time, purely to detect a
+// failure such as a syntax error in the template Perl before any formatting begins. Always checked at `depth: 0`: depth
+// only changes perltidy's width budget/indentation (via the synthetic brace-wrapping in `runPerltidy`), never whether
+// it can parse the source at all, so a depth-0 check here reliably predicts whether the real, depth-aware call `embed`
+// makes later would succeed too.
+//
+// This has to happen in `parse`, not `embed` since prettier's `printEmbeddedLanguages` wraps everything an `embed`
+// function does in a try/catch that silently discards any thrown error (falling back to an unformatted passthrough)
+// unless `PRETTIER_DEBUG` is set. A `parse`-time throw happens before that try/catch even exists, so it propagates as
+// a `format` rejection instead. This matches how prettier itself refuses to format an entire file it can't parse,
+// rather than reformatting everything else around one broken part.
+export const validateEmbeddedPerl = async (programNode: MojoNode, perltidyContext: PerltidyContext): Promise<void> => {
+    const { markers } = buildSkeleton(programNode);
+    for (const marker of markers) {
+        if (marker.reformat) {
+            // A structural marker's body (`if ($error) {`, `}`, `} else {`, ...) is never a complete, balanced Perl
+            // fragment by itself, and so perltidy fails on them regardless of whether the rest of the Perl code is
+            // fine, which is why `buildReformattedDoc` already treats that failure as an accepted, silent per-marker
+            // fallback rather than a real problem. Validating it here the same way that a self-contained marker is
+            // validated would flag every ordinary `<% if (...) { %>` construct as broken.
+            if (marker.structural) continue;
+
+            const { body } = marker.reformat;
+            // A whitespace-control marker with no real code (`<% =%>`) has nothing to tidy.
+            if (body.trim() === '') continue;
+            const perltidyInput = body.trimEnd().endsWith(';') ? body : `${body};`;
+            const result = await runPerltidy(perltidyInput, {
+                configPath: perltidyContext.perltidyrcPath,
+                depth: 0,
+                useTabs: perltidyContext.useTabs,
+                tabWidth: perltidyContext.tabWidth,
+                printWidth: perltidyContext.printWidth
+            });
+            if (result === null) {
+                throw new PerltidyFormatError(marker.text, {
+                    start: offsetToLineColumn(programNode.text, marker.start),
+                    end: offsetToLineColumn(programNode.text, marker.end)
+                });
+            }
+        } else if (marker.region) {
+            const result = await runPerltidy(marker.region.body, {
+                configPath: perltidyContext.perltidyrcPath,
+                depth: 0,
+                useTabs: perltidyContext.useTabs,
+                tabWidth: perltidyContext.tabWidth,
+                printWidth: perltidyContext.printWidth
+            });
+            if (result === null) {
+                throw new PerltidyFormatError(marker.region.body, {
+                    start: offsetToLineColumn(programNode.text, marker.start),
+                    end: offsetToLineColumn(programNode.text, marker.end)
+                });
+            }
+        }
+    }
+};
+
 // print() is effectively unreachable. embed() below fully handles the root (Program) node.
 export const printMojoNode = (path: AstPath<MojoNode>): Doc => path.node.text;
 
@@ -1497,13 +1600,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
         const tabWidth = options.tabWidth ?? 2;
         const indentUnit = options.useTabs ? '\t' : ' '.repeat(tabWidth);
         const printOpts = options as unknown as Parameters<typeof doc.printer.printDocToString>[1];
-        const perltidyContext: PerltidyContext = {
-            // Searched once per file, walking upward from the template's own directory.
-            perltidyrcPath: findPerltidyrc(dirname(options.filepath ?? process.cwd())),
-            useTabs: options.useTabs ?? false,
-            tabWidth,
-            printWidth: options.printWidth ?? 80
-        };
+        const perltidyContext = buildPerltidyContext(options);
 
         // Pass 1: throwaway HTML layout of the skeleton (see `buildPass1MarkerDoc`/`extractMarkerDepths`).
         const doc1 = await textToDoc(skeleton, { parser: 'html' });

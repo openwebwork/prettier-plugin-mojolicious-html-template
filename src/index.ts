@@ -1,7 +1,8 @@
 import type { Parser, Plugin, SupportLanguage } from 'prettier';
 import { parser as mojoParser } from './mojo/mojo.grammar.js';
 import { treeToAst, type MojoNode } from './mojo/ast.js';
-import { printMojoNode, embed } from './mojo/printer.js';
+import { printMojoNode, embed, buildPerltidyContext, validateEmbeddedPerl } from './mojo/printer.js';
+import { ensurePerltidyAvailable } from './mojo/perltidy.js';
 
 export const languages: SupportLanguage[] = [
     {
@@ -14,7 +15,17 @@ export const languages: SupportLanguage[] = [
 
 export const parsers: Record<string, Parser<MojoNode>> = {
     'mojolicious-html-template': {
-        parse: (text) => treeToAst(mojoParser.parse(text), text),
+        // Both the availability check and the per-marker perltidy validation happen here, and not inside embed or
+        // runPerltidy. This is because prettier catches errors thrown by an embed function and falls back to
+        // unformatted passthrough of the embedded content. However, a parse-time exception propagates as a format
+        // rejection.  This makes the error if perltidy is not installed or an error from perltidy parsing behave the
+        // same way prettier behaves for a file it can't parse.
+        parse: async (text, options) => {
+            await ensurePerltidyAvailable();
+            const ast = treeToAst(mojoParser.parse(text), text);
+            await validateEmbeddedPerl(ast, buildPerltidyContext(options));
+            return ast;
+        },
         astFormat: 'mojolicious-ast',
         locStart: (node) => node.start,
         locEnd: (node) => node.end
