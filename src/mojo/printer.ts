@@ -22,40 +22,31 @@ const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 const MASKED_MARKER_OPEN = String.fromCharCode(0xe007);
 const MASKED_MARKER_CLOSE = String.fromCharCode(0xe008);
 
-// A `<colgroup>` is used to mark open tags as prettier forces it's children onto separate lines.
-// Prettier only does that unconditionally for a hardcoded set of real tags. A made-up tag would just
-// collapse when short which is incorrect for Perl control-flow blocks. `<colgroup>` collides least
-// with genuine template markup. A real `</colgroup>` elsewhere is still handled as a collision by
-// `classifyWrapperCloses` below.
+// A `<colgroup>` is used to mark open tags as prettier forces it's children onto separate lines.  Prettier only does
+// that unconditionally for a hardcoded set of real tags. A made-up tag would just collapse when short which is
+// incorrect for Perl control-flow blocks. `<colgroup>` collides least with genuine template markup. A real
+// `</colgroup>` elsewhere is still handled as a collision by `classifyWrapperCloses` below.
 const WRAPPER_OPEN_TAG = '<colgroup data-mojo-wrapper>';
 const WRAPPER_CLOSE_TAG = '</colgroup>';
 
 // A wrapper for a `<%`-delimited Block's content, e.g. `<%= ..., begin =%> ... <% end =%>` or
-// `<% if (...) { %> ... <% } %>`. A bare `%` opened Block's content must never collapse even when
-// short. That's why `WRAPPER_OPEN_TAG` exists. Mojolicious requires a bare `%` control line to start
-// its own physical line. A `<%` delimited Block has no such restriction. It should lay out like a
-// real HTML element and collapse when it fits, even glued zero-gap to the Block's markers, the same
-// way `perltidy` collapses real Perl control-flow when it fits. A block-display tag can't do that,
-// since it's always forced onto its own line regardless of width. `<bdi>` is real, inline, and
-// collides least with genuine markup.
+// `<% if (...) { %> ... <% } %>`.  A block opened with `<%` continues until the closing `%>`. It should lay out like an
+// HTML element and collapse when it fits, the same way `perltidy` collapses Perl code when it fits.
 const TAGFORM_WRAPPER_OPEN_TAG = '<bdi data-mojo-tagform-wrapper>';
 const TAGFORM_WRAPPER_CLOSE_TAG = '</bdi>';
 
-// A second wrapper for a single own-line `PlainMarker`. Same "look like a real element" trick as
-// above, but without the extra indent level the content wrapper adds.
+// A second wrapper for a single line `PlainMarker`.
 const MARKER_WRAPPER_OPEN_TAG = '<colgroup data-mojo-marker>';
 
-// A third wrapper, nested inside the content wrapper. Applied only when a Block's content has an
-// inline element glued to trailing bare text (see `needsGluedTagProtection`), to work around the
-// outer wrapper's own mid-tag-split quirk in that shape.
+// A third wrapper, nested inside the content wrapper. Applied only when a Block's content has an inline element glued
+// to trailing bare text, to work around the outer wrapper's own mid-tag-split quirk in that shape.
 const CONTENT_INNER_OPEN_TAG = '<address data-mojo-inner>';
 const CONTENT_INNER_CLOSE_TAG = '</address>';
 
-// A `PlainMarker` with real Perl content gets `reformat` populated, so its placeholder is spliced out
-// for real, `perltidy`-formatted content (see `buildMarkerDoc`/`embed`). Structural markers
-// (Open/Mid/Close) are excluded, since each is a fragment of a larger `{`/`}`/`begin`/`end` chain and
-// never safe to reformat alone. `insidePre` marks a marker inside `<pre>`, whose boundaries must not
-// gain or lose even one character of whitespace. `ownLine` marks a marker that sat alone on its own
+// A `PlainMarker` with Perl content gets `reformat` populated, so its placeholder is spliced out for content formatted
+// by `perltidy`. Structural markers (Open/Mid/Close) are excluded, since each is a fragment of a larger
+// `{`/`}`/`begin`/`end` chain and never safe to reformat alone. `insidePre` marks a marker inside `<pre>`, whose
+// boundaries must not gain or lose even one character of whitespace. `ownLine` marks a marker that sat alone on its own
 // source line (see `buildReformattedDoc`'s single-line case for why it matters).
 interface MarkerInfo {
     text: string;
@@ -63,30 +54,20 @@ interface MarkerInfo {
     ownLine: boolean;
     reformat?: { prefix: string; body: string; suffix: string };
     // `continuation` is set when a trailing `%` `OpenMarker` ending in `{` sits where a region scan stopped. The region
-    // and that marker are reformatted together, since Mojo::Template treats them as one program regardless of the inner
+    // and that marker are reformatted together, since this region is treated as one code block regardless of the inner
     // content.  `markerId` is the id of the marker in the `markers` array, and `bareText` is its Perl code.
     region?: { body: string; continuation?: { markerId: number; bareText: string } };
-    // Whether this marker is a Block's OpenMarker, MidMarker, or CloseMarker. A structural marker's body (e.g. `if
-    // ($error) {`) is *never* a complete, balanced Perl fragment so perltidy fails on it regardless of whether the Perl
-    // is otherwise fine. That is an accepted syntax, not a sign of a real problem, so `validateEmbeddedPerl` must not
-    // treat a structural marker's failure as fatal the way it does for a self-contained one.
+    // Whether this marker is a Block's OpenMarker, MidMarker, or CloseMarker.
     structural: boolean;
-    // Character offsets into the *original* source (not the skeleton), so `validateEmbeddedPerl` can
-    // point `PerltidyFormatError.loc` at the actual offending spot in the template - see
-    // `offsetToLineColumn`.
+    // Character offsets into the original source.
     start: number;
     end: number;
     // Set for a `%` `OpenMarker` ending in `{` and holds the marker's Perl code.
     bareOpenBody?: string;
 }
 
-// Splits a reformat-eligible `PlainMarker`'s text into its delimiter and body, or `undefined` for a
-// shape this phase doesn't handle. A `<%# comment %>` tag (a genuine Mojolicious comment tag, not
-// merely a `<%`/`<%=`/`<%==` marker whose Perl content happens to contain a `#`) is excluded: unlike
-// ordinary Perl content, its body is never actually evaluated, so it can legitimately span several
-// physical lines without each one starting with its own `#`. Handing that to `perltidy` as Perl would
-// misparse every line after the first as real code. Left as raw passthrough instead, the same as any
-// other marker `perltidy` can't safely reformat.
+// Splits a `PlainMarker`'s text that is eligible to be reformatted into its delimiter and body, or `undefined` for a
+// shape this phase doesn't handle. A `<%# comment %>` tag is excluded. Its content is left unchanged.
 const splitMarkerDelimiters = (text: string): { prefix: string; body: string; suffix: string } | undefined => {
     if (text.startsWith('<%')) {
         const prefix = text.startsWith('<%==') ? '<%==' : text.startsWith('<%=') ? '<%=' : '<%';
@@ -103,59 +84,37 @@ const splitMarkerDelimiters = (text: string): { prefix: string; body: string; su
     return undefined;
 };
 
-// A Block's `OpenMarker` opens it either via a trailing `{` (Perl control-flow: `if`/`unless`/`for`/...)
-// or a trailing `begin` keyword (Mojolicious's block-capture syntax). `classify` in tokens.ts treats
-// both identically at the grammar level. What actually forces a Block onto its own physical line is
-// Mojolicious's own syntax rule for a *bare* `%` control line, which must start its own line or fail
-// to parse. It has nothing to do with control-flow vs. value-capture. A `<%`-delimited marker has no
-// such restriction either way.
+// A Block's `OpenMarker` opens either via a trailing `{` or a trailing `begin` keyword.
 const usesTagDelimiter = (openMarkerText: string): boolean => openMarkerText.startsWith('<%');
 
-// Whether a Block's `OpenMarker` ends specifically in the `begin` keyword (Mojolicious's block-capture
-// syntax, wrapping ordinary markup as a value) rather than a trailing `{` (genuine Perl control-flow).
+// Whether a Block's `OpenMarker` ends specifically in the `begin` keyword rather than a trailing `{`.
 const isTagFormOpenMarker = (openMarkerText: string): boolean =>
     /\bbegin\s*$/.test(splitMarkerDelimiters(openMarkerText)?.body ?? '');
 
-// A `<%`-delimited Block is eligible for the collapsible `<bdi>` wrapper (see `visitNode`), but which
-// *philosophy* governs when it actually collapses depends on what it wraps. A `begin`/`end` Block wraps
-// ordinary markup, so it collapses whenever it fits, the same way prettier lays out any real HTML
-// element, regardless of how the author wrote it. A `{`/`}` control-flow Block wraps genuine Perl,
-// which `perltidy` treats differently: it *preserves the author's own line-count choice*. `if (...) {
-// ... }` written on one line stays one line if it still fits. The same code written across several
-// lines stays several lines even if it would now fit joined. Checked here by looking for any newline
-// in the Block's own source text (`OpenMarker` through `CloseMarker`), including one hidden behind a
-// `\`-continuation, which suppresses a newline in the rendered output but still leaves a real `\n` in
-// the source. A bare-`%`-opened Block is never eligible either way (see `needsOwnLineAnchor`).
+// A `<%`-delimited Block is eligible for the collapsible `<bdi>` wrapper, but which *philosophy* governs when it
+// actually collapses depends on what it wraps. A `begin...end` Block wraps ordinary markup, so it collapses whenever it
+// fits. A `{...}` control-flow Block wraps Perl, for which `perltidy` preserves the newlines. `if (...) { ... }`
+// written on one line stays one line if it fits. The same code written across several lines stays several lines even if
+// it would fit joined. This is checked here by looking for any newline in the source code, including one hidden behind
+// a `\`-continuation.
 const isCollapsibleBlock = (node: MojoNode): boolean => {
     const openMarkerText = node.children[0]?.text ?? '';
     if (!usesTagDelimiter(openMarkerText)) return false;
     return isTagFormOpenMarker(openMarkerText) || !node.text.includes('\n');
 };
 
-// A bare `%` line with real Perl content. Not tag-form, not `%=`/`%==`, and not a content-free
-// `%`-alone line (see `isBlankPercentLine`).
 const isBarePercentLine = (node: MojoNode): boolean =>
     node.type === 'PlainMarker' &&
     node.text.startsWith('%') &&
     splitMarkerDelimiters(node.text) === undefined &&
     node.text.trim() !== '%';
 
-// A `%`-alone line. This templating format's equivalent of a blank line between statements.
 const isBlankPercentLine = (node: MojoNode): boolean => node.type === 'PlainMarker' && node.text.trim() === '%';
-
-// A Text node with nothing but whitespace in it. A run of one or more genuinely blank source lines.
 const isWhollyBlankText = (node: MojoNode): boolean => node.type === 'Text' && node.text.trim() === '';
 
-// One or more blank lines at the very end/start of a Text node's text, past the one line terminator
-// that must stay to end/begin the adjacent real line. Used to fold a bordering Text node's own
-// blank-line edge into a `%`-run being collapsed. See `collapseBlankRuns`.
 const TRAILING_BLANK_LINES_RE = /\n([ \t]*\n)+$/;
 const LEADING_BLANK_LINES_RE = /^\n([ \t]*\n)+/;
 
-// A real, content-bearing HTML opening tag at the very end of a Text node's text, with nothing but
-// whitespace after it, so whatever comes next is that tag's first child. Excludes a void element
-// (`<br>`, `<input>`, ...) or a self-closing tag, since neither opens any content for a following run
-// to be "inside" of. `VOID_ELEMENTS` is declared further down, alongside `normalizeVoidElements`.
 const HTML_OPEN_TAG_AT_END_RE = /<([a-zA-Z][\w-]*)((?:\s[^<>]*)?)>\s*$/;
 const endsWithHtmlOpenTag = (text: string): boolean => {
     const match = HTML_OPEN_TAG_AT_END_RE.exec(text);
@@ -164,29 +123,14 @@ const endsWithHtmlOpenTag = (text: string): boolean => {
     return !VOID_ELEMENTS.has(tagName.toLowerCase()) && !attrs.trimEnd().endsWith('/');
 };
 
-// An HTML closing tag at the very start of a Text node's text, past only leading whitespace, so
-// whatever came before is that tag's last child.
 const HTML_CLOSE_TAG_AT_START_RE = /^\s*<\/[a-zA-Z][\w-]*>/;
 const startsWithHtmlCloseTag = (text: string): boolean => HTML_CLOSE_TAG_AT_START_RE.test(text);
 
-// Collapses a maximal run of blank-`%` lines and whitespace-only lines, including a bordering Text
-// node's own blank-line edge, down to a single blank-`%` line. Matches how prettier collapses a run of
-// blank HTML lines down to one, preferring the `%` form the same way this plugin already does for a
-// run of nothing but blank-`%` lines. A run with no `%` in it is left untouched, since prettier's own
-// HTML printer already collapses that case correctly.
-//
-// A run touching the very start or end of a block's (or the file's) own content is dropped entirely
-// instead of collapsed, matching how prettier already strips a run of nothing but blank lines there.
-// `perltidy` has no such convention, so that's handled explicitly here. "Block" also means a plain
-// HTML element's own content, not just a Mojo control-flow Block. This AST has no notion of HTML
-// nesting at all (an HTML tag is just characters inside a Text node's text), so that's detected
-// separately, via `endsWithHtmlOpenTag`/`startsWithHtmlCloseTag` on the bordering Text node's raw text.
-//
-// None of this applies inside `<pre>`, where every character is rendering-significant, including a
-// blank line's own newlines. Collapsing or dropping one there would be a visible change to the
-// rendered page, not just a formatting nicety - `initiallyInsidePre` (the state at the very start of
-// `rawNodes`) combined with `computeInsidePreFlags` (tracking `<pre>`/`</pre>` opening or closing
-// partway through, mid-array) excludes any such node from run membership entirely.
+// Collapses a maximal run of blank-`%` lines and whitespace-only lines, including a bordering Text node's blank-line
+// edge, down to a single blank-`%` line. A run with no `%` in it is left untouched, since prettier's own HTML printer
+// already collapses that case correctly.  A run touching the very start or end of a block or the file is dropped
+// entirely.  None of this applies inside a `<pre>` tag. Collapsing or dropping one there would be a visible change to
+// the rendered page, not just a formatting nicety.
 const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): MojoNode[] => {
     const nodes = [...rawNodes];
     const insidePreFlags = computeInsidePreFlags(nodes, initiallyInsidePre);
@@ -206,8 +150,7 @@ const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): M
         const run = nodes.slice(i, j);
         const anchor = run.find(isBlankPercentLine);
         if (!anchor) {
-            // Pure whitespace, no `%` anywhere in the run. Leave it for prettier's own printer to
-            // collapse down to one blank line.
+            // Pure whitespace, no `%` anywhere in the run. Leave it for prettier to handle.
             result.push(...run);
             i = j;
             continue;
@@ -218,23 +161,15 @@ const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): M
         const atStart = prev === undefined || (prev.type === 'Text' && endsWithHtmlOpenTag(prev.text));
         const atEnd = next === undefined || (next.type === 'Text' && startsWithHtmlCloseTag(next.text));
 
-        // A newline-only stand-in for whichever real run member it replaces. Never `anchor` itself,
-        // so a dropped run never leaves a fake, mangled copy of a real marker node behind.
+        // A newline-only stand-in for whichever run member it replaces.
         const newlineStub = (basis: MojoNode): MojoNode => ({ ...basis, type: 'Text', text: '\n' });
         if (atStart && atEnd) {
-            // The run touches both boundaries of whatever it's inside: a Block, an HTML element, or
-            // the file. Drop it entirely. Nothing is left on either side to separate from anything.
+            // The run touches both boundaries of the block, file, or HTML element. Drop it entirely.
             i = j;
             continue;
         }
         if (atStart) {
-            // Touches the start of this block's (or the file's, or an HTML element's) own content.
-            // Drop the whole run, `anchor` included, the same way prettier already strips a run of
-            // nothing but blank lines there. `next` is guaranteed defined here, since `atEnd` is
-            // false whenever `atStart` alone triggers this branch. It still needs the same
-            // real-newline handling as the interior case below when it isn't Text, or it ends up
-            // glued directly to whatever comes right after the dropped run (usually a nested Block's
-            // own wrapper tag) with no separator at all.
+            // This run touches the start of the block, file, or HTML element. Drop the run.
             if (next?.type === 'Text') {
                 if (LEADING_BLANK_LINES_RE.test(next.text)) {
                     nodes[j] = { ...next, text: next.text.replace(LEADING_BLANK_LINES_RE, '\n') };
@@ -246,9 +181,7 @@ const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): M
             continue;
         }
         if (atEnd) {
-            // Same reasoning, mirrored, for a run touching the end instead. `prev` is guaranteed
-            // defined here. `atStart` was checked and handled above, so it's false by this point,
-            // and its own definition is exactly what rules out `prev === undefined`.
+            // This run touches the end of the block, file, or HTML element. Drop the run.
             if (prev.type === 'Text') {
                 if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
                     result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
@@ -260,14 +193,7 @@ const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): M
             continue;
         }
 
-        // An interior run: neither `atStart` nor `atEnd`, by elimination, so both `prev` and `next`
-        // are guaranteed defined here too. Collapses down to `anchor`. A real bordering Text node
-        // always already carries the one real newline `anchor` needs on that side, since a blank `%`
-        // line always starts its own physical line. Trimming its own blank-line edge, if it has one,
-        // is all that's needed. When a bordering node isn't Text at all (a Block or another marker
-        // sitting directly against the run, with nothing of its own to trim), a minimal stand-in
-        // newline is added instead, so `anchor` doesn't end up glued straight onto it with no
-        // separator.
+        // This is an interior run.
         if (prev.type === 'Text') {
             if (TRAILING_BLANK_LINES_RE.test(prev.text)) {
                 result[result.length - 1] = { ...prev, text: prev.text.replace(TRAILING_BLANK_LINES_RE, '\n') };
@@ -288,18 +214,14 @@ const collapseBlankRuns = (rawNodes: MojoNode[], initiallyInsidePre: boolean): M
     return result;
 };
 
-// A closing HTML tag immediately followed by non-whitespace, non-`<` content. The shape
-// `CONTENT_INNER_OPEN_TAG` guards against.
+// A closing HTML tag immediately followed by non-whitespace and non-`<` content.
 const GLUED_CLOSE_TAG_RE = /<\/[a-zA-Z][\w-]*>(?=[^\s<])/;
 
-// True if a Block's content has the glued-closing-tag shape `CONTENT_INNER_OPEN_TAG` exists to
-// protect against. Checked against a flattened string where every marker/nested Block is one opaque
-// character.
+// True if a Block's content has the glued-closing-tag shape `CONTENT_INNER_OPEN_TAG` exists to protect against.
 const needsGluedTagProtection = (nodes: MojoNode[]): boolean =>
     GLUED_CLOSE_TAG_RE.test(nodes.map((node) => (node.type === 'Text' ? node.text : 'X')).join(''));
 
-// True if `node` is a `Block` whose entire content, recursively, is nothing but bare `%` lines and
-// whitespace. Safe to reconstruct into one balanced Perl program.
+// True if `node` is a `Block` whose entire content, recursively, is nothing but `%` opened lines and whitespace.
 const isPureBlock = (node: MojoNode): boolean =>
     node.type === 'Block' &&
     node.children.every((child) => {
@@ -310,25 +232,20 @@ const isPureBlock = (node: MojoNode): boolean =>
         return false;
     });
 
-// A node safe to fold into a pure-Perl region alongside its siblings (see `registerRegion`). A lone
-// bare `%` line, or a whole pure `Block`.
+// A node that is safe to fold into a pure-Perl region alongside its siblings.
 const isEligibleRegionMember = (node: MojoNode): boolean => isBarePercentLine(node) || isPureBlock(node);
 
-// A node whose own-line placement relies on the whitespace-anchor mechanism in `visitSequence` below,
-// rather than a real wrapper element. A bare `%` line, or a Block ineligible for the collapsible
-// wrapper (see `isCollapsibleBlock`). A `%` control line must start its own physical line, or
-// Mojolicious fails to parse it.
+// A node whose line placement relies on the whitespace-anchor mechanism in `visitSequence`,
+// rather than a wrapper element.
 const needsOwnLineAnchor = (node: MojoNode): boolean =>
     (node.type === 'Block' && !isCollapsibleBlock(node)) || isBarePercentLine(node);
 
-// Mojo::Template suppresses a text line's trailing newline when it ends in `\`, joining it directly
-// to what follows in the rendered output. A bare `\<newline>` inside a `Text` node means nothing to
-// HTML, so prettier's reflow can merge it into surrounding prose, silently changing that whitespace.
-// An empty wrapper anchor is spliced in after every `\<newline>` to force a hard line break there.
-// When the `\` is itself glued to preceding content, `GLUED_BACKSLASH_SENTINEL` stands in for it
-// instead of a literal `\`, so `stripWrappersAndSubstitute` can tell a glued backslash (needs
-// re-merging) apart from one the author deliberately wrote on its own, already-isolated line (must
-// stay separate).
+// Mojo::Template suppresses a text line's trailing newline when it ends in `\`, joining it directly to what follows in
+// the rendered output. A `\<newline>` inside a text node means nothing to HTML, so prettier's reflow can merge it into
+// surrounding prose, silently changing that whitespace. An empty wrapper anchor is spliced in after every `\<newline>`
+// to force a hard line break there.  When the `\` is itself glued to preceding content, `GLUED_BACKSLASH_SENTINEL`
+// stands in for it instead of a literal `\`, so `stripWrappersAndSubstitute` can tell a glued backslash (needs
+// re-merging) apart from one the author deliberately wrote on its own, already-isolated line.
 const BACKSLASH_NEWLINE_RE = /\\\n/g;
 const withBackslashContinuationAnchors = (text: string): string =>
     text.replace(BACKSLASH_NEWLINE_RE, (_match, offset: number) => {
@@ -338,9 +255,8 @@ const withBackslashContinuationAnchors = (text: string): string =>
         return `${backslashText}\n${WRAPPER_OPEN_TAG}${WRAPPER_CLOSE_TAG}`;
     });
 
-// Whether `skeletonSoFar` has an unclosed `<pre>` (plain open/close counting, not a real parser). The
-// backslash-continuation anchor above is harmful inside `<pre>`, whose whitespace prettier never
-// reformats.
+// Check for an unclosed `<pre>` tag. The backslash-continuation anchor above is harmful inside `<pre>`,
+// whose whitespace prettier never reformats.
 const PRE_OPEN_TAG_RE = /<pre(?:\s[^<>]*)?>/g;
 const PRE_CLOSE_TAG_RE = /<\/pre>/g;
 const isInsidePre = (skeletonSoFar: string): boolean => {
@@ -349,10 +265,7 @@ const isInsidePre = (skeletonSoFar: string): boolean => {
     return opens > closes;
 };
 
-// Whether we're inside `<pre>` at the start of each node in `nodes`, given the state before the very
-// first one. An incremental version of `isInsidePre`, needed by `collapseBlankRuns`: `<pre>` can open
-// or close partway through a single `visitSequence` call, since it's just characters inside a Text
-// node's own text, not a boundary this AST already splits sibling sequences on.
+// Check if inside a `<pre>` tag at the start of each node in `nodes`, given the state before the first one.
 const PRE_TAG_RE = /<pre(?:\s[^<>]*)?>|<\/pre>/g;
 const computeInsidePreFlags = (nodes: MojoNode[], initiallyInsidePre: boolean): boolean[] => {
     const flags: boolean[] = [];
@@ -366,11 +279,9 @@ const computeInsidePreFlags = (nodes: MojoNode[], initiallyInsidePre: boolean): 
     return flags;
 };
 
-// Whether `skeletonSoFar` sits inside a real HTML tag's still-open angle brackets (plain backward
-// scan for the nearest real `<` or `>`, not a real parser). A marker here, e.g. splicing extra
-// attributes via `<%== get_attrs(...) %>` into a `<div ...>`, can't use the own-line `<colgroup>`
-// wrapper. Nesting an element inside another tag's attribute list is invalid HTML and crashes
-// prettier's HTML parser.
+// Check if inside a real HTML tag's still-open angle brackets. A marker here, e.g. splicing extra attributes via `<%==
+// get_attrs(...) %>` into a `<div ...>`, can't use the own-line `<colgroup>` wrapper. Nesting an element inside another
+// tag's attribute list is invalid HTML and crashes prettier's HTML parser.
 const isInsideOpenTagAttrs = (skeletonSoFar: string): boolean => {
     for (let i = skeletonSoFar.length - 1; i >= 0; --i) {
         const c = skeletonSoFar[i];
@@ -380,19 +291,15 @@ const isInsideOpenTagAttrs = (skeletonSoFar: string): boolean => {
     return false;
 };
 
-// prettier's HTML printer inserts a newline right after a `<pre ...>` tag's own `>` whenever its
-// content spans multiple lines and doesn't already start with one. That's harmless for rendering, but
-// it changes the source structure `insidePreContent` tracking assumes is untouched. `PRE_GLUE_SENTINEL`
-// marks where that insertion lands so the split line can be merged back. Inserted unconditionally, not
-// just when the content turns out multi-line, since an unneeded sentinel is simply deleted in place on
-// resolution.
+// prettier's HTML printer inserts a newline right after the `>` of a `pre` tag whenever its content spans multiple
+// lines and doesn't already start with one. That's harmless for rendering, but it changes the source structure
+// `insidePreContent` tracking assumes is untouched. `PRE_GLUE_SENTINEL` marks where that insertion lands so the split
+// line can be merged back.
 const insertPreGlueSentinel = (text: string): { text: string; deferredToNextNode: boolean } => {
     let deferredToNextNode = false;
     const withSentinel = text.replace(PRE_OPEN_TAG_RE, (match: string, offset: number) => {
         const matchEnd = offset + match.length;
         if (matchEnd === text.length) {
-            // The tag is the last thing in this Text node. What follows isn't known yet, so defer to
-            // whichever node comes next.
             deferredToNextNode = true;
             return match;
         }
@@ -401,9 +308,7 @@ const insertPreGlueSentinel = (text: string): { text: string; deferredToNextNode
     return { text: withSentinel, deferredToNextNode };
 };
 
-// Reconstructs the real Perl source a region's nodes represent, for one combined `perltidy` call. A
-// marker contributes its text with the leading `%` stripped. A `Block` recurses through its children.
-// A blank line is preserved only where the source genuinely had one.
+// Reconstructs the Perl source a region's nodes represent, for one `perltidy` call.
 const flattenNode = (node: MojoNode): string => {
     if (node.type === 'Text') return node.text.split('\n').length > 2 ? '\n' : '';
     if (isBlankPercentLine(node)) return '\n';
@@ -411,16 +316,10 @@ const flattenNode = (node: MojoNode): string => {
     return `${node.text.slice(1).trim()}\n`;
 };
 
-// A marker's placeholder token. No padding needed: its real content is spliced into the Doc tree
-// before prettier's own fits/break decisions run (see `embed`), so its length in the skeleton never
-// influences the final layout, in either pass (see `buildPass1MarkerDoc` for Pass 1's own reason).
 const makePlaceholder = (id: number): string => `${MARKER_OPEN}${id.toString()}${MARKER_CLOSE}`;
 
-// Builds a plain-HTML "skeleton" standing in for the whole template. Every Mojo marker becomes a
-// unique placeholder, and a Block's content is wrapped in the synthetic element above, so prettier's
-// HTML parser sees and matches tags across Mojo markers in one combined parse.
+// Builds a plain-HTML "skeleton" with Mojo::Template syntax replaced with placeholders.
 const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: MarkerInfo[] } => {
-    // Source text, used to check whether a marker sits alone on its own line. See `isOwnLine` below.
     const source = programNode.text;
     const markers: MarkerInfo[] = [];
     let skeleton = '';
@@ -874,10 +773,10 @@ const walkWrapperDepths = (formatted: string, indentUnit: string, onLine: (line:
     let wrapperCloseIndex = 0;
     let tagformCloseIndex = 0;
 
-    // A line whose content starts with `PRE_GLUE_SENTINEL` is where prettier's own newline landed,
-    // inserted right after a `<pre ...>` tag. That newline carries no indentation of its own (see
-    // `insertPreGlueSentinel`), so this line's *own* leading whitespace understates where it actually
-    // ends up once merged back onto the `<pre ...>` line above it. Reused instead of computed fresh.
+    // A line whose content starts with `PRE_GLUE_SENTINEL` is where prettier's own newline landed, inserted right after
+    // a `<pre ...>` tag. That newline carries no indentation of its own, so this line's *own* leading whitespace
+    // understates where it actually ends up once merged back onto the `<pre ...>` line above it. Reused instead of
+    // computed fresh.
     let previousDepth = 0;
 
     for (const line of formatted.split('\n')) {
@@ -1701,7 +1600,7 @@ export const validateEmbeddedPerl = async (programNode: MojoNode, perltidyContex
     }
 };
 
-// print() is effectively unreachable. embed() below fully handles the root (Program) node.
+// print is effectively unreachable. embed below fully handles the root (Program) node.
 export const printMojoNode = (path: AstPath<MojoNode>): Doc => path.node.text;
 
 export const embed = (path: AstPath<MojoNode>, options: Options) => {
