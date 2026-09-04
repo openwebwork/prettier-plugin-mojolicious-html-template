@@ -62,7 +62,10 @@ interface MarkerInfo {
     insidePre: boolean;
     ownLine: boolean;
     reformat?: { prefix: string; body: string; suffix: string };
-    region?: { body: string };
+    // `continuation` is set when a trailing `%` `OpenMarker` ending in `{` sits where a region scan stopped. The region
+    // and that marker are reformatted together, since Mojo::Template treats them as one program regardless of the inner
+    // content.  `markerId` is the id of the marker in the `markers` array, and `bareText` is its Perl code.
+    region?: { body: string; continuation?: { markerId: number; bareText: string } };
     // Whether this marker is a Block's OpenMarker, MidMarker, or CloseMarker. A structural marker's body (e.g. `if
     // ($error) {`) is *never* a complete, balanced Perl fragment so perltidy fails on it regardless of whether the Perl
     // is otherwise fine. That is an accepted syntax, not a sign of a real problem, so `validateEmbeddedPerl` must not
@@ -73,6 +76,8 @@ interface MarkerInfo {
     // `offsetToLineColumn`.
     start: number;
     end: number;
+    // Set for a `%` `OpenMarker` ending in `{` and holds the marker's Perl code.
+    bareOpenBody?: string;
 }
 
 // Splits a reformat-eligible `PlainMarker`'s text into its delimiter and body, or `undefined` for a
@@ -421,6 +426,25 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
     let skeleton = '';
     let counter = 0;
 
+    // A `%`-opened Block's OpenMarker, found where the scan stopped, and mapped to the id of the region it may
+    // continue. It is populated *before* this node is visited, and consumed the moment it is, patching the region's
+    // `continuation` in with this marker's id and bare text.
+    const regionContinuationCandidates = new Map<MojoNode, number>();
+
+    // True if the line immediately before the `node`'s line starts with a `%`. Used to keep `bareOpenBody` from being
+    // applied to an OpenMarker that's actually a continuation of whatever `%` content precedes it.
+    const precededByBarePercentLine = (node: MojoNode): boolean => {
+        let i = node.start - 1;
+        while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) --i;
+        if (i < 0 || source[i] !== '\n') return false;
+        let j = i - 1;
+        while (j >= 0 && (source[j] === ' ' || source[j] === '\t')) --j;
+        if (j < 0 || source[j] === '\n') return false;
+        let lineStart = j;
+        while (lineStart > 0 && source[lineStart - 1] !== '\n') --lineStart;
+        return /^[ \t]*%/.test(source.slice(lineStart, j + 1));
+    };
+
     // True if only horizontal whitespace separates `node` from the preceding newline (or file start).
     const precededByRealContent = (node: MojoNode): boolean => {
         let i = node.start - 1;
@@ -493,6 +517,15 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
         // is just as self-contained as any other tag-form marker, so it's eligible the same way. No
         // need to gate on `node.type` here at all.
         const reformat = splitMarkerDelimiters(node.text);
+
+        const bareOpenBody =
+            !insidePre &&
+            node.type === 'OpenMarker' &&
+            !node.text.startsWith('<%') &&
+            /\{\s*$/.test(node.text.trim()) &&
+            !precededByBarePercentLine(node)
+                ? node.text.slice(1).trim()
+                : undefined;
         markers[id] = {
             text: node.text,
             insidePre,
@@ -500,8 +533,17 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
             reformat,
             structural: isStructuralMarker(node.type),
             start: node.start,
-            end: node.end
+            end: node.end,
+            bareOpenBody
         };
+
+        // This marker is the continuation `regionContinuationCandidates` predicted when the scan of the preceding
+        // region stopped at it. Patch its id and Perl code into that region's `MarkerInfo` so
+        // `stripWrappersAndSubstitute` can reformat both together.
+        const linkedRegionId = regionContinuationCandidates.get(node);
+        const linkedRegion = linkedRegionId !== undefined ? markers[linkedRegionId].region : undefined;
+        if (linkedRegion) linkedRegion.continuation = { markerId: id, bareText: node.text.slice(1).trim() };
+
         const placeholder = makePlaceholder(id);
 
         // A bare placeholder is just text to HTML and reflows regardless of source formatting. An
@@ -561,7 +603,7 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
     // Registers a maximal run of `isEligibleRegionMember` siblings as one combined `perltidy` unit.
     // Uses the same own-line wrapper mechanism as a single marker, skipped inside `<pre>` for the same
     // reason `registerMarker`'s own skips it - see there.
-    const registerRegion = (nodes: MojoNode[]) => {
+    const registerRegion = (nodes: MojoNode[]): number => {
         const id = counter++;
 
         // A leading/trailing whitespace-only Text node would otherwise leave a stray blank line.
@@ -576,14 +618,13 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
             insidePre,
             ownLine: true,
             region: { body: nodes.map(flattenNode).join('').trim() },
-            // The joined region body is a complete Perl program by construction, unlike a lone structural marker.
-            // So a failure here is always treated as fatal in `validateEmbeddedPerl`.
             structural: false,
             start: nodes[0].start,
             end: nodes[nodes.length - 1].end
         };
         const placeholder = makePlaceholder(id);
         skeleton += insidePre ? placeholder : `${MARKER_WRAPPER_OPEN_TAG}${placeholder}${WRAPPER_CLOSE_TAG}`;
+        return id;
     };
 
     // A run of sibling nodes. Scans for maximal `isEligibleRegionMember` runs first, registering each
@@ -616,7 +657,23 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
                         break;
                     }
                 }
-                registerRegion(nodes.slice(i, end));
+                const regionNodes = nodes.slice(i, end);
+                const regionId = registerRegion(regionNodes);
+
+                // If the scan stopped at a `%`-opened Block, that Block's OpenMarker may be a continuation of a
+                // multi-line statement this region's last line left incomplete. Record it here, before that OpenMarker
+                // is visited, so `registerMarker` can link the two once it is.
+                const terminator = j < nodes.length ? nodes[j] : undefined;
+                const terminatorOpenMarker = terminator?.type === 'Block' ? terminator.children[0] : undefined;
+                if (
+                    !isInsidePre(skeleton) &&
+                    terminatorOpenMarker &&
+                    !usesTagDelimiter(terminatorOpenMarker.text) &&
+                    /\{\s*$/.test(terminatorOpenMarker.text.trim()) &&
+                    regionNodes.every((n) => n.type !== 'Block')
+                ) {
+                    regionContinuationCandidates.set(terminatorOpenMarker, regionId);
+                }
                 i = end;
                 continue;
             }
@@ -1243,6 +1300,9 @@ const stripWrappersAndSubstitute = async (
     let insidePreContent = false;
     const PRE_OPEN_LINE_RE = /<pre(?:\s[^<>]*)?>/;
 
+    // Marker ids whose own line renders as nothing at all.
+    const suppressedMarkerIds = new Set<number>();
+
     for (const line of lines) {
         const trimmed = line.trim();
 
@@ -1475,11 +1535,16 @@ const stripWrappersAndSubstitute = async (
         // There's no delimiter to glue a first line onto, so all of them, including the first, keep
         // their full real indent, with `% ` inserted after each line's own leading whitespace.
         const soleMatch = SOLE_MARKER_RE.exec(content);
-        const marker = soleMatch ? markers[Number(soleMatch[1])] : undefined;
+        const soleMarkerId = soleMatch ? Number(soleMatch[1]) : undefined;
+        const marker = soleMarkerId !== undefined ? markers[soleMarkerId] : undefined;
+
+        // This line's marker was already rendered as part of a preceding region's combined output.
+        if (soleMarkerId !== undefined && suppressedMarkerIds.has(soleMarkerId)) continue;
+
         if (marker?.region) {
             const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
+            const { continuation } = marker.region;
 
-            // Every line gets `% ` (2 columns) that perltidy's own budget never accounted for.
             const perltidyLines = await runPerltidy(marker.region.body, {
                 configPath: perltidyContext.perltidyrcPath,
                 depth,
@@ -1497,6 +1562,60 @@ const stripWrappersAndSubstitute = async (
                     output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
                 }
                 continue;
+            }
+
+            if (continuation) {
+                const combinedLines = await runPerltidy(`${marker.region.body}\n${continuation.bareText}\n}`, {
+                    configPath: perltidyContext.perltidyrcPath,
+                    depth,
+                    useTabs: perltidyContext.useTabs,
+                    tabWidth: perltidyContext.tabWidth,
+                    printWidth: Math.max(1, perltidyContext.printWidth - 2)
+                });
+                if (
+                    combinedLines &&
+                    combinedLines.length > 1 &&
+                    combinedLines[combinedLines.length - 1].trim() === '}'
+                ) {
+                    for (const perltidyLine of combinedLines.slice(0, -1)) {
+                        if (perltidyLine === '') {
+                            output.push(`${indent}%`);
+                            continue;
+                        }
+                        const leading = /^\s*/.exec(perltidyLine)?.[0] ?? '';
+                        output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
+                    }
+                    suppressedMarkerIds.add(continuation.markerId);
+                    continue;
+                }
+            }
+        }
+
+        if (marker?.bareOpenBody !== undefined) {
+            const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
+            const fullLine = `${indent}% ${marker.bareOpenBody}`;
+            const fits =
+                visualColumn(fullLine, fullLine.length, perltidyContext.useTabs, perltidyContext.tabWidth) <=
+                perltidyContext.printWidth;
+            if (!fits) {
+                const perltidyLines = await runPerltidy(`${marker.bareOpenBody}\n}`, {
+                    configPath: perltidyContext.perltidyrcPath,
+                    depth,
+                    useTabs: perltidyContext.useTabs,
+                    tabWidth: perltidyContext.tabWidth,
+                    printWidth: perltidyContext.printWidth
+                });
+                if (
+                    perltidyLines &&
+                    perltidyLines.length > 1 &&
+                    perltidyLines[perltidyLines.length - 1].trim() === '}'
+                ) {
+                    for (const perltidyLine of perltidyLines.slice(0, -1)) {
+                        const leading = /^\s*/.exec(perltidyLine)?.[0] ?? '';
+                        output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
+                    }
+                    continue;
+                }
             }
         }
 
@@ -1558,29 +1677,29 @@ export const validateEmbeddedPerl = async (programNode: MojoNode, perltidyContex
             // A whitespace-control marker with no real code (`<% =%>`) has nothing to tidy.
             if (body.trim() === '') continue;
             const perltidyInput = body.trimEnd().endsWith(';') ? body : `${body};`;
-            const result = await runPerltidy(perltidyInput, {
+            const lines = await runPerltidy(perltidyInput, {
                 configPath: perltidyContext.perltidyrcPath,
                 depth: 0,
                 useTabs: perltidyContext.useTabs,
                 tabWidth: perltidyContext.tabWidth,
                 printWidth: perltidyContext.printWidth
             });
-            if (result === null) {
+            if (lines === null) {
                 throw new PerltidyFormatError(marker.text, {
                     start: offsetToLineColumn(programNode.text, marker.start),
                     end: offsetToLineColumn(programNode.text, marker.end)
                 });
             }
-        } else if (marker.region) {
-            const result = await runPerltidy(marker.region.body, {
+        } else if (marker.bareOpenBody !== undefined) {
+            const lines = await runPerltidy(`${marker.bareOpenBody}\n}`, {
                 configPath: perltidyContext.perltidyrcPath,
                 depth: 0,
                 useTabs: perltidyContext.useTabs,
                 tabWidth: perltidyContext.tabWidth,
                 printWidth: perltidyContext.printWidth
             });
-            if (result === null) {
-                throw new PerltidyFormatError(marker.region.body, {
+            if (lines === null) {
+                throw new PerltidyFormatError(marker.text, {
                     start: offsetToLineColumn(programNode.text, marker.start),
                     end: offsetToLineColumn(programNode.text, marker.end)
                 });

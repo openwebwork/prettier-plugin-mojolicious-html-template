@@ -173,6 +173,20 @@ exports[`output-sigil-begin-end.html.ep 1`] = `
 "
 `;
 
+exports[`percent-continuation-into-impure-block.html.ep 1`] = `
+"
+<div>
+    <div>
+        % if ( ref $grader->{pg}{flags}{ANSWER_ENTRY_ORDER} eq 'ARRAY'
+            % && @{ $grader->{pg}{flags}{ANSWER_ENTRY_ORDER} } > 1 )
+        % {
+            <span>placeholder</span>
+        % }
+    </div>
+</div>
+"
+`;
+
 exports[`percent-line-hash-in-string.html.ep 1`] = `
 "
 % my $x = "value#not-a-comment";

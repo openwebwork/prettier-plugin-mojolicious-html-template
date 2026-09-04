@@ -1,0 +1,9 @@
+<div>
+    <div>
+        % if ( ref $grader->{pg}{flags}{ANSWER_ENTRY_ORDER} eq 'ARRAY'
+            % && @{ $grader->{pg}{flags}{ANSWER_ENTRY_ORDER} } > 1 )
+        % {
+            <span>placeholder</span>
+        % }
+    </div>
+</div>
