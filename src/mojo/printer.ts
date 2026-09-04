@@ -431,8 +431,9 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
     // `continuation` in with this marker's id and bare text.
     const regionContinuationCandidates = new Map<MojoNode, number>();
 
-    // True if the line immediately before the `node`'s line starts with a `%`. Used to keep `bareOpenBody` from being
-    // applied to an OpenMarker that's actually a continuation of whatever `%` content precedes it.
+    // True if the line immediately before the `node`'s line starts with a `%` and could plausibly be an unfinished
+    // continuation of the same Perl statement, i.e. it has content, and isn't a comment. Used to keep `bareOpenBody`
+    // from being applied to an OpenMarker that's actually a continuation of whatever `%` content precedes it.
     const precededByBarePercentLine = (node: MojoNode): boolean => {
         let i = node.start - 1;
         while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) --i;
@@ -442,7 +443,8 @@ const buildSkeleton = (programNode: MojoNode): { skeleton: string; markers: Mark
         if (j < 0 || source[j] === '\n') return false;
         let lineStart = j;
         while (lineStart > 0 && source[lineStart - 1] !== '\n') --lineStart;
-        return /^[ \t]*%/.test(source.slice(lineStart, j + 1));
+        const trimmed = source.slice(lineStart, j + 1).trim();
+        return trimmed.startsWith('%') && trimmed !== '%' && !/^%\s*#/.test(trimmed);
     };
 
     // True if only horizontal whitespace separates `node` from the preceding newline (or file start).
@@ -1593,29 +1595,20 @@ const stripWrappersAndSubstitute = async (
 
         if (marker?.bareOpenBody !== undefined) {
             const depth = indentUnit.length === 0 ? 0 : indent.length / indentUnit.length;
-            const fullLine = `${indent}% ${marker.bareOpenBody}`;
-            const fits =
-                visualColumn(fullLine, fullLine.length, perltidyContext.useTabs, perltidyContext.tabWidth) <=
-                perltidyContext.printWidth;
-            if (!fits) {
-                const perltidyLines = await runPerltidy(`${marker.bareOpenBody}\n}`, {
-                    configPath: perltidyContext.perltidyrcPath,
-                    depth,
-                    useTabs: perltidyContext.useTabs,
-                    tabWidth: perltidyContext.tabWidth,
-                    printWidth: perltidyContext.printWidth
-                });
-                if (
-                    perltidyLines &&
-                    perltidyLines.length > 1 &&
-                    perltidyLines[perltidyLines.length - 1].trim() === '}'
-                ) {
-                    for (const perltidyLine of perltidyLines.slice(0, -1)) {
-                        const leading = /^\s*/.exec(perltidyLine)?.[0] ?? '';
-                        output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
-                    }
-                    continue;
+
+            const perltidyLines = await runPerltidy(`${marker.bareOpenBody}\n}`, {
+                configPath: perltidyContext.perltidyrcPath,
+                depth,
+                useTabs: perltidyContext.useTabs,
+                tabWidth: perltidyContext.tabWidth,
+                printWidth: perltidyContext.printWidth
+            });
+            if (perltidyLines && perltidyLines.length > 1 && perltidyLines[perltidyLines.length - 1].trim() === '}') {
+                for (const perltidyLine of perltidyLines.slice(0, -1)) {
+                    const leading = /^\s*/.exec(perltidyLine)?.[0] ?? '';
+                    output.push(`${leading}% ${perltidyLine.slice(leading.length)}`);
                 }
+                continue;
             }
         }
 

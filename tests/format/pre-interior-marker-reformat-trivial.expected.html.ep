@@ -1,5 +1,5 @@
 <div id="problem_body" class="problem-content">
-	% if ($displayMode eq 'PTX' || $displayMode eq 'tex') {
+	% if ( $displayMode eq 'PTX' || $displayMode eq 'tex' ) {
 		<pre><%= "$problemText" %></pre>
 	% } else {
 		%== $problemText

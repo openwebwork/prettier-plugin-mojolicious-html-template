@@ -169,16 +169,48 @@ test('a genuinely broken bare-% if condition still fails, even though most struc
     ).rejects.toThrow(PerltidyFormatError);
 });
 
-// A bare-% `if (...) {` that already fits within printWidth must be left completely untouched -
-// reformatting it anyway would silently normalize the condition's own spacing (`if($x)` -> `if ($x)`),
-// a cosmetic change nobody asked for. Only a condition that's actually too long pays that cost, in
-// exchange for wrapping at all (see the `bare-percent-open-marker-wraps-when-long` format fixture).
-test('a short bare-% if condition that already fits is left untouched', async () => {
-    const source = '<div>\n    % if($x){\n        <span>x</span>\n    % }\n</div>\n';
-    const output = await prettier.format(source, {
+// A bare-% `if (...) {` gets perltidy's own spacing normalization even when it already fits within
+// printWidth - width only ever affects line-breaking, never whether normalization happens at all,
+// matching how every other reformat-eligible marker and region already behaves. An earlier, narrower
+// version of this only reformatted when the line was too long, which meant messy spacing in a short,
+// already-fitting condition was silently left as-is - found directly, against a real template, where
+// deliberately-added extra spaces in an already-short `for (...)` condition were never cleaned up.
+test('a short bare-% if condition still gets its spacing normalized', async () => {
+    const output = await prettier.format('<div>\n    % if($x){\n        <span>x</span>\n    % }\n</div>\n', {
         filepath: 'short-bare-if.html.ep',
         parser: 'mojolicious-html-template',
         plugins: [plugin]
     });
-    expect(output).toBe(source);
+    expect(output).toBe('<div>\n    % if ($x) {\n        <span>x</span>\n    % }\n</div>\n');
+});
+
+// The blank `%`-only line commonly used as a separator between statements must never itself count as
+// "preceded by bare-% content" for the check above - it can never be part of a multi-line continuation,
+// so treating it as one would permanently disable normalization for whatever `if`/`for`/etc. follows it
+// (found directly, in the same real template as the fix above: a blank `%` line sat right before the
+// `for (...)` with the extra spacing, and an earlier version of the preceding-line check wrongly treated
+// that blank line as a sign of continuation).
+test('a bare-% if condition right after a blank % separator line still gets normalized', async () => {
+    const source =
+        '<div>\n' +
+        '    % my $y = 1;\n' +
+        '    %\n' +
+        '    % if($x){\n' +
+        '        <span>x</span>\n' +
+        '    % }\n' +
+        '</div>\n';
+    const output = await prettier.format(source, {
+        filepath: 'after-blank-percent.html.ep',
+        parser: 'mojolicious-html-template',
+        plugins: [plugin]
+    });
+    expect(output).toBe(
+        '<div>\n' +
+            '    % my $y = 1;\n' +
+            '    %\n' +
+            '    % if ($x) {\n' +
+            '        <span>x</span>\n' +
+            '    % }\n' +
+            '</div>\n'
+    );
 });
