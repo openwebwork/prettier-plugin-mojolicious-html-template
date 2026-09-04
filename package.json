@@ -1,6 +1,6 @@
 {
     "name": "@openwebwork/prettier-plugin-mojolicious-html-template",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "Prettier Mojolicious template file plugin",
     "author": "The WeBWorK Project",
     "license": "LGPL-3.0-or-later",
