@@ -21,6 +21,9 @@ const TAG_GLUE_SENTINEL = String.fromCharCode(0xe006);
 // Brackets a masked-out Mojo marker span during `normalizeVoidElements`. See there for why.
 const MASKED_MARKER_OPEN = String.fromCharCode(0xe007);
 const MASKED_MARKER_CLOSE = String.fromCharCode(0xe008);
+// Brackets an extracted `style="..."` attribute's placeholder. See `extractStyleAttributes`.
+const STYLE_ATTR_OPEN = `${String.fromCharCode(0xe009)}MOJOSTYLE`;
+const STYLE_ATTR_CLOSE = String.fromCharCode(0xe00a);
 
 // A `<colgroup>` is used to mark open tags as prettier forces it's children onto separate lines.  Prettier only does
 // that unconditionally for a hardcoded set of real tags. A made-up tag would just collapse when short which is
@@ -1076,27 +1079,69 @@ const buildMarkerDoc = async (
     return linesToDoc(marker.text.split('\n'), false);
 };
 
-// Splices every `reformat`-eligible marker's placeholder out for its real Doc (built above),
-// walking the html Doc tree with `doc.utils.mapDoc` *before* printing, so prettier's fits/break
-// algorithm sees the marker's true shape directly instead of a padded guess. A placeholder with no
-// entry in `markerDocs` (structural/region markers, which stay on the text-substitution path in
-// `stripWrappersAndSubstitute`) is left as literal text, resolved later as today.
-const spliceMarkerDocs = (htmlDoc: Doc, markerDocs: Map<number, Doc>): Doc =>
+// Walks an html Doc tree with `doc.utils.mapDoc` before printing, splicing every placeholder
+// matching `re` out for its Doc, so prettier's fits/break algorithm sees the shape directly
+// instead of a padded guess. A placeholder with no entry in `docs` is left as literal text.
+const splicePlaceholderDocs = (htmlDoc: Doc, re: RegExp, docs: Map<number, Doc>): Doc =>
     doc.utils.mapDoc(htmlDoc, (node) => {
         if (typeof node !== 'string') return node;
-        const matches = [...node.matchAll(MARKER_RE)];
+        const matches = [...node.matchAll(re)];
         if (matches.length === 0) return node;
         const parts: Doc[] = [];
         let lastIndex = 0;
         for (const match of matches) {
             const start = match.index;
             if (start > lastIndex) parts.push(node.slice(lastIndex, start));
-            parts.push(markerDocs.get(Number(match[1])) ?? match[0]);
+            parts.push(docs.get(Number(match[1])) ?? match[0]);
             lastIndex = start + match[0].length;
         }
         if (lastIndex < node.length) parts.push(node.slice(lastIndex));
         return parts.length === 1 ? parts[0] : parts;
     });
+
+// Splices every `reformat`-eligible marker's placeholder out for its Doc. A
+// placeholder with no entry in `markerDocs` is left as literal text.
+const spliceMarkerDocs = (htmlDoc: Doc, markerDocs: Map<number, Doc>): Doc =>
+    splicePlaceholderDocs(htmlDoc, MARKER_RE, markerDocs);
+
+// Finds every style attribute inside a tag attribute list and replaces its value with a short placeholder,
+// recording the CSS text so it can be formatted and spliced back in later.
+const STYLE_ATTR_SCAN_RE = /(?<![\w-])style\s*=\s*(["'])([\s\S]*?)\1/gi;
+const extractStyleAttributes = (skeleton: string): { skeleton: string; values: Map<number, string> } => {
+    const values = new Map<number, string>();
+    let nextId = 0;
+    const result = skeleton.replace(
+        STYLE_ATTR_SCAN_RE,
+        (match: string, _quote: string, value: string, offset: number) => {
+            const isReal =
+                value.trim() !== '' && !value.includes(MARKER_OPEN) && isInsideOpenTagAttrs(skeleton.slice(0, offset));
+            if (!isReal) return match;
+            const id = nextId++;
+            values.set(id, value);
+            // Prettier normalizes attribute quoting to double quotes regardless
+            // of what is used in the source, so the placeholder's quotes do too.
+            return `style="${STYLE_ATTR_OPEN}${id.toString()}${STYLE_ATTR_CLOSE}"`;
+        }
+    );
+    return { skeleton: result, values };
+};
+
+const STYLE_RE = new RegExp(`${STYLE_ATTR_OPEN}(\\d+)${STYLE_ATTR_CLOSE}`, 'g');
+
+const buildStyleAttributeDoc = async (
+    textToDoc: (text: string, opts: Options) => Promise<Doc>,
+    rawValue: string
+): Promise<Doc> => {
+    const cssDoc = await textToDoc(rawValue, { parser: 'css', __isHTMLStyleAttribute: true });
+    const escaped = doc.utils.mapDoc(cssDoc, (node) =>
+        typeof node === 'string' ? node.replaceAll('"', '&quot;') : node
+    );
+    const { group, indent, softline } = doc.builders;
+    return group([indent([softline, escaped]), softline]);
+};
+
+const spliceStyleDocs = (htmlDoc: Doc, styleDocs: Map<number, Doc>): Doc =>
+    splicePlaceholderDocs(htmlDoc, STYLE_RE, styleDocs);
 
 // The HTML void elements, per the WHATWG spec. Never have a closing tag or content.
 const VOID_ELEMENTS = new Set([
@@ -1607,11 +1652,17 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
     if (path.node.type !== 'Program') return null;
 
     return async (textToDoc: (text: string, opts: Options) => Promise<Doc>): Promise<Doc> => {
-        const { skeleton, markers } = buildSkeleton(path.node);
+        const { skeleton: rawSkeleton, markers } = buildSkeleton(path.node);
+        const { skeleton, values: styleValues } = extractStyleAttributes(rawSkeleton);
         const tabWidth = options.tabWidth ?? 2;
         const indentUnit = options.useTabs ? '\t' : ' '.repeat(tabWidth);
         const printOpts = options as unknown as Parameters<typeof doc.printer.printDocToString>[1];
         const perltidyContext = buildPerltidyContext(options);
+
+        const styleDocs = new Map<number, Doc>();
+        for (const [id, rawValue] of styleValues) {
+            styleDocs.set(id, await buildStyleAttributeDoc(textToDoc, rawValue));
+        }
 
         // Pass 1: throwaway HTML layout of the skeleton (see `buildPass1MarkerDoc`/`extractMarkerDepths`).
         const doc1 = await textToDoc(skeleton, { parser: 'html' });
@@ -1620,7 +1671,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
             const marker = markers[id];
             if (marker.reformat) pass1Docs.set(id, buildPass1MarkerDoc(id, marker));
         }
-        const splicedDoc1 = spliceMarkerDocs(doc1, pass1Docs);
+        const splicedDoc1 = spliceStyleDocs(spliceMarkerDocs(doc1, pass1Docs), styleDocs);
         const { formatted: formatted1 } = doc.printer.printDocToString(splicedDoc1, printOpts);
         const depths = extractMarkerDepths(formatted1, markers, indentUnit);
 
@@ -1635,7 +1686,7 @@ export const embed = (path: AstPath<MojoNode>, options: Options) => {
         // Pass 2: fresh HTML layout with each marker's placeholder spliced out for its real Doc before
         // prettier's fits/break decisions run.
         const doc2 = await textToDoc(skeleton, { parser: 'html' });
-        const splicedDoc = spliceMarkerDocs(doc2, markerDocs);
+        const splicedDoc = spliceStyleDocs(spliceMarkerDocs(doc2, markerDocs), styleDocs);
         const { formatted: formatted2 } = doc.printer.printDocToString(splicedDoc, printOpts);
 
         const result = await stripWrappersAndSubstitute(formatted2, markers, indentUnit, perltidyContext);

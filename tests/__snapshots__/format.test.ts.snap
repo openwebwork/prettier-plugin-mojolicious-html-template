@@ -233,7 +233,7 @@ exports[`pre-tag-preserves-indentation.html.ep 1`] = `
 <ul>
 	% if ( defined $x ) {
 		<li>
-			<pre style="display:inline"><% =%>\\
+			<pre style="display: inline"><% =%>\\
 				<code><%= $x->[0] %>: <%= $x->[1] %></code><% =%>\\
 			</pre>
 		</li>
@@ -248,6 +248,22 @@ exports[`script-marker.html.ep 1`] = `
 	const webworkConfig = <%== $c->webwork_js_config($showMathJaxErrors) %>;
 	const total = <%= $count %>;
 </script>
+"
+`;
+
+exports[`style-attribute-short-stays-inline.html.ep 1`] = `
+"
+<div>
+    <div style="color: red">x</div>
+</div>
+"
+`;
+
+exports[`style-attribute-with-marker-left-alone.html.ep 1`] = `
+"
+<div>
+    <div style="color: <%= $color %>; background: blue">x</div>
+</div>
 "
 `;
 
