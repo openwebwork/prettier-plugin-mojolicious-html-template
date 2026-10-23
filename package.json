@@ -32,23 +32,23 @@
         "pretest:update": "npm run generate-grammar",
         "test:update": "vitest run --update"
     },
+    "dependencies": {
+        "@lezer/lr": "^1.4.11"
+    },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
-        "@lezer/generator": "^1.8.0",
+        "@lezer/generator": "^1.8.1",
         "@stylistic/eslint-plugin": "^5.10.0",
-        "@types/node": "^26.1.0",
-        "eslint": "^10.6.0",
+        "@types/node": "^26.6.5",
+        "eslint": "^10.13.0",
         "eslint-config-prettier": "^10.1.8",
-        "globals": "^17.7.0",
-        "prettier": "^3.9.4",
+        "globals": "^17.13.0",
+        "prettier": "^3.9.10",
         "typescript": "^6.0.3",
-        "typescript-eslint": "^8.62.1",
-        "vitest": "^4.1.10"
+        "typescript-eslint": "^8.72.0",
+        "vitest": "^5.0.5"
     },
     "peerDependencies": {
-        "prettier": "^3.9.4"
-    },
-    "dependencies": {
-        "@lezer/lr": "^1.4.10"
+        "prettier": "3.9.4 - 3.9.10"
     }
 }
